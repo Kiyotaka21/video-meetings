@@ -1,0 +1,18 @@
+# Единый LF в рабочей копии на всех платформах: .editorconfig и Prettier
+# настроены на LF, иначе на Windows `prettier --check` падал бы после клона.
+* text=auto eol=lf
+
+# Бинарники не трогаем
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary
+*.webm binary
+
+# Лок-файл не шумит в diff и не считается исходником
+bun.lock -diff linguist-generated=true
