@@ -1,34 +1,6 @@
 {
   "name": "video-meetings",
   "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "packageManager": "bun@1.3.14",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
-  "engines": {
-    "bun": ">=1.2.0",
-    "node": ">=20.19.0"
-  },
-  "scripts": {
-    "dev": "bun run --filter '*' dev",
-    "dev:web": "bun run --filter @video-meetings/web dev",
-    "dev:api": "bun run --filter @video-meetings/api dev",
-    "build": "bun run --filter '*' build",
-    "build:web": "bun run --filter @video-meetings/web build",
-    "build:api": "bun run --filter @video-meetings/api build",
-    "start:api": "bun run --filter @video-meetings/api start",
-    "typecheck": "bun run --filter '*' typecheck",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "check": "bun run format:check && bun run lint && bun run typecheck",
-    "clean": "rm -rf node_modules apps/*/node_modules apps/*/dist apps/*/.nuxt apps/*/.output packages/*/node_modules packages/*/dist",
-    "start:web": "bun run --filter @video-meetings/web start"
-  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.9.1",
@@ -36,7 +8,36 @@
     "eslint-plugin-vue": "^10.10.0",
     "globals": "^17.12.0",
     "prettier": "^3.9.6",
+    "prettier-plugin-tailwindcss": "^0.8.1",
     "typescript": "^5",
     "typescript-eslint": "^8.69.0"
-  }
+  },
+  "engines": {
+    "bun": ">=1.2.0",
+    "node": ">=20.19.0"
+  },
+  "packageManager": "bun@1.3.14",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --filter '*' dev",
+    "dev:web": "bun run --filter @video-meetings/web dev",
+    "dev:api": "bun run --filter @video-meetings/api dev",
+    "build": "bun run --filter '*' build",
+    "build:web": "bun run --filter @video-meetings/web build",
+    "build:api": "bun run --filter @video-meetings/api build",
+    "start:web": "bun run --filter @video-meetings/web start",
+    "start:api": "bun run --filter @video-meetings/api start",
+    "typecheck": "bun run --filter '*' typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "bun run format:check && bun run lint && bun run typecheck",
+    "clean": "rm -rf node_modules apps/*/node_modules apps/*/dist apps/*/.nuxt apps/*/.output packages/*/node_modules packages/*/dist"
+  },
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
 }

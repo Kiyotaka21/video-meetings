@@ -1,24 +1,9 @@
+@import 'tailwindcss';
+@import '@nuxt/ui';
+
+/* Токены дизайн-системы. Радиус и ширина контейнера — единственное,
+   что мы двигаем относительно дефолтов Nuxt UI. */
 :root {
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
-  line-height: 1.5;
-  color-scheme: light dark;
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-}
-
-a {
-  color: inherit;
+  --ui-radius: 0.5rem;
+  --ui-container: 72rem;
 }

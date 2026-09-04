@@ -6,8 +6,18 @@ useSeoMeta({ title: 'Кабинет — Video Meetings', robots: 'noindex' })
 </script>
 
 <template>
-  <section>
-    <h1>Кабинет</h1>
-    <p>Только клиентский рендеринг. API: {{ apiUrl }}</p>
-  </section>
+  <div class="flex flex-col gap-6">
+    <div class="flex flex-col gap-2">
+      <h1 class="text-3xl font-semibold tracking-tight text-highlighted">Кабинет</h1>
+      <p class="text-muted">Только клиентский рендеринг — SEO здесь не нужен.</p>
+    </div>
+
+    <UAlert
+      icon="i-lucide-plug"
+      color="neutral"
+      variant="subtle"
+      title="Адрес API"
+      :description="apiUrl"
+    />
+  </div>
 </template>

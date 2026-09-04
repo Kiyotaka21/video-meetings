@@ -5,5 +5,9 @@
   "tabWidth": 2,
   "trailingComma": "all",
   "arrowParens": "always",
-  "endOfLine": "lf"
+  "endOfLine": "lf",
+  "plugins": ["prettier-plugin-tailwindcss"],
+  "tailwindStylesheet": "./apps/web/app/assets/css/main.css",
+  "tailwindFunctions": ["defineAppConfig"],
+  "tailwindAttributes": ["ui"]
 }
