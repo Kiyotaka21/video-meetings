@@ -2,10 +2,10 @@
 
 Монорепозиторий на **Bun workspaces** с двумя приложениями:
 
-| Пакет                 | Путь       | Стек                         | Порт |
-| --------------------- | ---------- | ---------------------------- | ---- |
-| `@video-meetings/web` | `apps/web` | Nuxt 4 (Vue 3, Vite, Nitro)  | 5173 |
-| `@video-meetings/api` | `apps/api` | Elysia.js + Bun + TypeScript | 3000 |
+| Пакет                 | Путь       | Стек                          | Порт |
+| --------------------- | ---------- | ----------------------------- | ---- |
+| `@video-meetings/web` | `apps/web` | Nuxt 4 + Nuxt UI (Tailwind 4) | 5173 |
+| `@video-meetings/api` | `apps/api` | Elysia.js + Bun + TypeScript  | 3000 |
 
 `packages/` зарезервирован под общие библиотеки (пока пуст).
 
@@ -94,7 +94,13 @@ grep -o '<title>[^<]*' apps/web/.output/public/index.html
   `typescript-eslint`, `eslint-plugin-vue`, `eslint-config-prettier`. Для `apps/web`
   отключён `no-undef` (авто-импорты Nuxt ловит `vue-tsc` по типам из `.nuxt`)
   и `vue/multi-word-component-names` для `pages/` и `layouts/`.
-- **Prettier 3** — `.prettierrc.json`, форматирование отделено от линтинга.
+- **Prettier 3** — `.prettierrc.json`, форматирование отделено от линтинга. Файлы,
+  которые пишет Claude Code, форматируются автоматически хуком из
+  `.claude/settings.json` — детали в корневом `CLAUDE.md`.
+- **Nuxt UI 4** — компоненты на Reka UI и Tailwind CSS 4. Брендинг в
+  `apps/web/app.config.ts`, токены в `apps/web/app/assets/css/main.css`. В разметке
+  только семантические цвета (`text-muted`, `bg-elevated`), не raw-палитра Tailwind.
+  Классы сортирует `prettier-plugin-tailwindcss`.
 - **Elysia-плагины** — `@elysiajs/cors` (origin'ы из `CORS_ORIGINS`, `credentials: true`)
   и `@elysiajs/openapi` (Scalar UI на `/docs`, спека на `/docs/json`; выключен при
   `NODE_ENV=production`).
