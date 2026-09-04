@@ -49,3 +49,8 @@ Thumbs.db
 .output/
 .nitro/
 .data/
+
+# Скиллы агентов: сами файлы лежат в .agents/ и коммитятся.
+# .claude/skills — локальный слой обнаружения из симлинков с абсолютными путями
+# на .agents/skills; при core.symlinks=false git записал бы содержимое повторно.
+.claude/skills/

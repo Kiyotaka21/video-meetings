@@ -8,3 +8,7 @@ bun.lockb
 .output
 .nitro
 .data
+
+# Скиллы агентов — сторонний контент, не наш стиль
+.agents
+.claude/skills

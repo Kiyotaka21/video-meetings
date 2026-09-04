@@ -15,6 +15,8 @@ export default tseslint.config(
       '**/.output/**',
       '**/.nitro/**',
       '**/.data/**',
+      '**/.agents/**',
+      '**/.claude/skills/**',
       '**/coverage/**',
       '**/*.tsbuildinfo',
     ],
