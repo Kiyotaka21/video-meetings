@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/format-file.mjs\"",
+            "timeout": 30,
+            "statusMessage": "Prettier форматирует файл…"
+          }
+        ]
+      }
+    ]
+  }
+}

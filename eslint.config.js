@@ -92,4 +92,14 @@ export default tseslint.config(
       globals: { ...globals.node },
     },
   },
+
+  {
+    name: 'app/claude-hooks',
+    // Хуки агента — скрипты для bun/node, а не код приложения: им нужны
+    // process, Buffer и console, которых нет в браузерном наборе globals.
+    files: ['.claude/hooks/**/*.mjs'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
 )
