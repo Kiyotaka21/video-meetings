@@ -54,3 +54,7 @@ Thumbs.db
 # .claude/skills — локальный слой обнаружения из симлинков с абсолютными путями
 # на .agents/skills; при core.symlinks=false git записал бы содержимое повторно.
 .claude/skills/
+
+# Снапшоты, логи и скриншоты MCP-сервера Playwright: он пишет их в cwd
+# при каждом вызове браузера.
+.playwright-mcp/

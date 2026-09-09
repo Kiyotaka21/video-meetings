@@ -12,3 +12,6 @@ bun.lockb
 # Скиллы агентов — сторонний контент, не наш стиль
 .agents
 .claude/skills
+
+# Артефакты MCP-сервера Playwright
+.playwright-mcp
