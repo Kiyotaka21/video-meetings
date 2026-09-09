@@ -2,9 +2,27 @@
 import type { FormErrorEvent } from '@nuxt/ui'
 
 import type { AuthFailure, Credentials } from '~/types/auth'
-import { PASSWORD_MIN_LENGTH, validateCredentials } from '~/utils/auth'
+import { validateCredentials } from '~/utils/auth'
 
+/**
+ * Одна форма на вход и на регистрацию. Различий между экранами ровно столько,
+ * сколько пропсов ниже; всё остальное — валидация, перенос фокуса, объявление
+ * ошибок — общее, и держать это в двух файлах значило бы починить доступность
+ * в одном и забыть про второй.
+ */
 interface Props {
+  /** Подпись кнопки отправки: «Войти» или «Создать аккаунт». */
+  submitLabel: string
+  /**
+   * `current-password` для входа, `new-password` для регистрации. От этого
+   * зависит, предложит браузер сохранённый пароль или сгенерирует новый, —
+   * и по этому же атрибуту поле ищется в DOM для переноса фокуса.
+   */
+  passwordAutocomplete: 'current-password' | 'new-password'
+  /** Подсказки под полями. Нужны и затем, чтобы строка под полем существовала
+   *  заранее: иначе текст ошибки сдвигает вёрстку на высоту строки. */
+  emailHelp: string
+  passwordHelp: string
   /** Запрос в полёте: блокирует поля и включает индикатор на кнопке. */
   loading?: boolean
   /** Отказ от api. Компонент только показывает его, решение о повторе — за страницей. */
@@ -19,12 +37,13 @@ const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 
 /** Нужен, чтобы найти поле в DOM для переноса фокуса: id инпутов генерирует Nuxt UI. */
-const FORM_ID = 'register-form'
+const formId = useId()
 
 const state = reactive<Credentials>({ email: '', password: '' })
 const isPasswordVisible = shallowRef(false)
 
-// Отказ без поля — про запрос целиком (api недоступен, 5xx), такому место в алерте.
+// Отказ без поля — про запрос целиком (api недоступен, неверная пара логин/пароль,
+// 5xx), такому место в алерте над формой, а не под одним из полей.
 const requestError = computed(() =>
   props.failure && !props.failure.field ? props.failure.message : null,
 )
@@ -38,16 +57,30 @@ const passwordError = computed(() =>
 const passwordType = computed(() => (isPasswordVisible.value ? 'text' : 'password'))
 
 /**
+ * Текст про пустой пароль выводится из `autocomplete`, а не приходит отдельным
+ * пропом: `new-password` и есть «регистрация», `current-password` — «вход»,
+ * второй флаг о том же разъехался бы с первым при первой же правке.
+ */
+const emptyPasswordMessage = computed(() =>
+  props.passwordAutocomplete === 'new-password' ? 'Придумайте пароль' : 'Введите пароль',
+)
+
+const validate = (state: Partial<Credentials>) =>
+  validateCredentials(state, emptyPasswordMessage.value)
+
+/**
  * Поле ищем по `autocomplete`, а не по `type`: у пароля тип переключается на
  * `text`, когда включён показ, и селектор по типу перестаёт его находить.
  */
 const focusInForm = (selector: string) => {
-  document.getElementById(FORM_ID)?.querySelector<HTMLElement>(selector)?.focus()
+  document.getElementById(formId)?.querySelector<HTMLElement>(selector)?.focus()
 }
 
 const focusField = (field: keyof Credentials) => {
   const selector =
-    field === 'email' ? 'input[autocomplete="email"]' : 'input[autocomplete="new-password"]'
+    field === 'email'
+      ? 'input[autocomplete="email"]'
+      : `input[autocomplete="${props.passwordAutocomplete}"]`
 
   focusInForm(selector)
 }
@@ -102,9 +135,9 @@ const onSubmit = () => emit('submit', { ...state })
 
 <template>
   <UForm
-    :id="FORM_ID"
+    :id="formId"
     :state="state"
-    :validate="validateCredentials"
+    :validate="validate"
     :disabled="props.loading"
     :loading-auto="false"
     novalidate
@@ -125,7 +158,7 @@ const onSubmit = () => emit('submit', { ...state })
       name="email"
       label="Электронная почта"
       required
-      help="Понадобится для входа"
+      :help="props.emailHelp"
       :error="emailError"
     >
       <UInput
@@ -145,13 +178,13 @@ const onSubmit = () => emit('submit', { ...state })
       name="password"
       label="Пароль"
       required
+      :help="props.passwordHelp"
       :error="passwordError"
-      :help="`Минимум ${PASSWORD_MIN_LENGTH} символов`"
     >
       <UInput
         v-model="state.password"
         :type="passwordType"
-        autocomplete="new-password"
+        :autocomplete="props.passwordAutocomplete"
         required
         icon="i-lucide-lock"
         size="lg"
@@ -171,6 +204,6 @@ const onSubmit = () => emit('submit', { ...state })
       </UInput>
     </UFormField>
 
-    <UButton type="submit" size="lg" block :loading="props.loading" label="Создать аккаунт" />
+    <UButton type="submit" size="lg" block :loading="props.loading" :label="props.submitLabel" />
   </UForm>
 </template>

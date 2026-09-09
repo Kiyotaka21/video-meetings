@@ -1,6 +1,7 @@
 import type { FormError } from '@nuxt/ui'
 
 import type { AuthFailure, Credentials } from '~/types/auth'
+import { NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
 
 /**
  * Границы повторяют схему `credentials` на api. Дублирование осознанное: без
@@ -18,8 +19,17 @@ export const PASSWORD_MAX_LENGTH = 128
  */
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-/** Валидатор для `:validate` у `UForm`: пустой массив — форма валидна. */
-export const validateCredentials = (state: Partial<Credentials>): FormError[] => {
+/**
+ * Валидатор для `:validate` у `UForm`: пустой массив — форма валидна.
+ *
+ * `emptyPasswordMessage` параметром, потому что правила у входа и регистрации
+ * одни, а текст — нет: на регистрации пароль придумывают, на входе вспоминают.
+ * Один общий текст на обеих формах читался бы как чужой на одной из них.
+ */
+export const validateCredentials = (
+  state: Partial<Credentials>,
+  emptyPasswordMessage: string,
+): FormError[] => {
   const errors: FormError[] = []
   const email = state.email?.trim() ?? ''
   const password = state.password ?? ''
@@ -33,7 +43,7 @@ export const validateCredentials = (state: Partial<Credentials>): FormError[] =>
   }
 
   if (!password) {
-    errors.push({ name: 'password', message: 'Придумайте пароль' })
+    errors.push({ name: 'password', message: emptyPasswordMessage })
   } else if (password.length < PASSWORD_MIN_LENGTH) {
     errors.push({ name: 'password', message: `Минимум ${PASSWORD_MIN_LENGTH} символов` })
   } else if (password.length > PASSWORD_MAX_LENGTH) {
@@ -43,17 +53,8 @@ export const validateCredentials = (state: Partial<Credentials>): FormError[] =>
   return errors
 }
 
-/**
- * У ofetch код ответа лежит в `statusCode`. Проверяем структурно, а не через
- * `instanceof FetchError`: тип пришлось бы тянуть из транзитивной зависимости.
- */
-const statusOf = (error: unknown): number | undefined =>
-  typeof error === 'object' &&
-  error !== null &&
-  'statusCode' in error &&
-  typeof error.statusCode === 'number'
-    ? error.statusCode
-    : undefined
+/** Тело формы api не устроило, хотя нашу валидацию оно прошло: границы разъехались. */
+const REJECTED_BY_API = 'API отклонил данные формы — проверьте адрес и пароль.'
 
 /**
  * Раскладывает отказ `/auth/register` на текст для пользователя. 409 — единственный
@@ -64,11 +65,30 @@ export const describeRegisterFailure = (error: unknown): AuthFailure => {
     case 409:
       return { field: 'email', message: 'Этот адрес уже зарегистрирован' }
     case 422:
-      return { message: 'API отклонил данные формы — проверьте адрес и пароль.' }
+      return { message: REJECTED_BY_API }
     case undefined:
-      // Ни статуса, ни ответа: api не запущен, упал CORS или пропала сеть.
-      return { message: 'Нет связи с API. Проверьте, что бэкенд запущен.' }
+      return { message: NO_CONNECTION_MESSAGE }
     default:
       return { message: 'Не удалось создать аккаунт. Попробуйте ещё раз.' }
+  }
+}
+
+/**
+ * Раскладывает отказ `/auth/login`. Ключевое отличие от регистрации — 401 без
+ * `field`: api намеренно отвечает одинаково на неизвестный адрес и на неверный
+ * пароль, чтобы по ответу не перебирали зарегистрированные адреса. Подсветить
+ * одно из полей значило бы додумать за api то, чего он не сказал, — поэтому
+ * текст уходит в алерт над формой.
+ */
+export const describeLoginFailure = (error: unknown): AuthFailure => {
+  switch (statusOf(error)) {
+    case 401:
+      return { message: 'Неверный адрес почты или пароль' }
+    case 422:
+      return { message: REJECTED_BY_API }
+    case undefined:
+      return { message: NO_CONNECTION_MESSAGE }
+    default:
+      return { message: 'Не удалось войти. Попробуйте ещё раз.' }
   }
 }

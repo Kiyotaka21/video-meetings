@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
 
+/**
+ * Пункты статичные и публичные, от наличия токена не зависят. Так сделано
+ * намеренно: `/pricing`, `/login` и `/register` пререндерятся, и меню, собранное
+ * по куке, разошлось бы между статическим HTML (токена при сборке нет) и
+ * гидратацией. Кто вошёл и кнопка выхода — на самой странице кабинета.
+ */
 const items: NavigationMenuItem[] = [
   { label: 'Тарифы', icon: 'i-lucide-tag', to: '/pricing' },
-  { label: 'Кабинет', icon: 'i-lucide-layout-dashboard', to: '/app' },
+  { label: 'Вход', icon: 'i-lucide-log-in', to: '/login' },
   { label: 'Регистрация', icon: 'i-lucide-user-plus', to: '/register' },
 ]
 </script>
@@ -12,7 +18,14 @@ const items: NavigationMenuItem[] = [
   <div class="flex min-h-dvh flex-col bg-default text-default">
     <header class="border-b border-default">
       <div class="mx-auto flex h-16 max-w-(--ui-container) items-center gap-4 px-4 sm:px-6">
-        <NuxtLink to="/" class="flex shrink-0 items-center gap-2 font-semibold text-highlighted">
+        <!-- Индикатор фокуса задан руками: у голого `NuxtLink`, в отличие от
+             `UButton` и `UNavigationMenu`, своего нет, а логотип — первая
+             остановка Tab на каждой странице, и без рамки клавиатурный
+             пользователь не видит, где он находится. -->
+        <NuxtLink
+          to="/"
+          class="flex shrink-0 items-center gap-2 rounded-(--ui-radius) font-semibold text-highlighted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
           <UIcon name="i-lucide-video" class="size-5 text-primary" />
           Video Meetings
         </NuxtLink>

@@ -129,23 +129,27 @@ bun run --filter @video-meetings/api test:watch
 
 Nuxt настроен на гибридный рендеринг — `routeRules` в `apps/web/nuxt.config.ts`:
 
-| Маршрут     | Режим             | Зачем                                               |
-| ----------- | ----------------- | --------------------------------------------------- |
-| `/`         | `prerender: true` | Статика в `.output/public` — индексируется          |
-| `/pricing`  | `prerender: true` | То же                                               |
-| `/register` | `prerender: true` | Регистрация: публичный вход, HTML отдаётся статикой |
-| `/blog/**`  | `isr: 3600`       | Кэш на час, страниц пока нет                        |
-| `/room/**`  | `ssr: false`      | WebRTC и `getUserMedia` требуют реального браузера  |
-| `/app/**`   | `ssr: false`      | Кабинет за авторизацией, SEO не нужен               |
+| Маршрут           | Режим                         | Зачем                                              |
+| ----------------- | ----------------------------- | -------------------------------------------------- |
+| `/`               | `ssr: false` + `X-Robots-Tag` | Кабинет за авторизацией, SEO не нужен              |
+| `/pricing`        | `prerender: true`             | Статика в `.output/public` — индексируется         |
+| `/login`          | `prerender: true`             | Вход: публичная точка входа, HTML статикой         |
+| `/register`       | `prerender: true`             | То же для регистрации                              |
+| `/blog/**`        | `isr: 3600`                   | Кэш на час, страниц пока нет                       |
+| `/room/**`        | `ssr: false`                  | WebRTC и `getUserMedia` требуют реального браузера |
+| `/app`, `/app/**` | `redirect: '/'`               | Кабинет переехал на `/`, старые ссылки не 404      |
+
+Публичных индексируемых страниц три: `/pricing`, `/login`, `/register`. На корне
+лежит кабинет — он закрыт route middleware и без токена уводит на `/login`.
 
 Проверить после `bun run build:`
 
 ```bash
-ls apps/web/.output/public          # index.html и pricing/index.html
-grep -o '<title>[^<]*' apps/web/.output/public/index.html
+ls apps/web/.output/public          # pricing/, login/ и register/
+grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 ```
 
-`/room/**` и `/app/**` в `.output/public` не попадают — это ожидаемо, они
+`/`, `/room/**` и `/app/**` в `.output/public` не попадают — это ожидаемо, они
 отдаются клиентской оболочкой.
 
 ## Структура
@@ -167,12 +171,13 @@ grep -o '<title>[^<]*' apps/web/.output/public/index.html
 │   └── web                 # Nuxt 4
 │       ├── app             # srcDir Nuxt 4
 │       │   ├── assets/css
-│       │   ├── components  # auth/ — форма регистрации
-│       │   ├── composables # useAuth: токен и запросы к /auth
+│       │   ├── components  # auth/, dashboard/, meetings/
+│       │   ├── composables # useAuth и useMeetings: токен и запросы к api
 │       │   ├── layouts
+│       │   ├── middleware  # auth: guard приватных страниц
 │       │   ├── pages       # файловый роутинг
 │       │   ├── types       # контракт api на клиенте
-│       │   ├── utils       # валидация и разбор ошибок
+│       │   ├── utils       # валидация, разбор ошибок, формат дат
 │       │   └── app.vue
 │       ├── public          # robots.txt и статика
 │       └── nuxt.config.ts

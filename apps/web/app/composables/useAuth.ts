@@ -1,9 +1,9 @@
-import type { Credentials, TokenResponse } from '~/types/auth'
+import type { AuthUser, Credentials, TokenResponse } from '~/types/auth'
 
 /**
  * Токен лежит в куке, а не в `localStorage`: `useCookie` читается и на сервере,
- * поэтому будущий route middleware сможет отбить неавторизованного до рендера,
- * не дожидаясь гидратации.
+ * поэтому route middleware отбивает неавторизованного до рендера страницы, не
+ * дожидаясь гидратации.
  */
 const TOKEN_COOKIE = 'auth_token'
 
@@ -19,12 +19,25 @@ export const useAuth = () => {
     path: '/',
   })
 
+  /**
+   * Пользователь — общее состояние приложения, а не локальное для вызова
+   * композабла: `useState` отдаёт всем один и тот же объект, поэтому шапка,
+   * страница и любой будущий компонент не делают по запросу `/auth/me` каждый.
+   */
+  const user = useState<AuthUser | null>('auth:user', () => null)
+
   const { apiUrl } = useRuntimeConfig().public
   const isAuthenticated = computed(() => Boolean(token.value))
 
   /**
-   * Ошибку не глотает: вызывающий раскладывает её через `describeRegisterFailure`,
-   * потому что текст для пользователя зависит от того, где стоит форма.
+   * Заголовок для закрытых маршрутов api. Живёт здесь, а не в вызывающем
+   * композабле, чтобы формат `Bearer` и имя куки не разъезжались по файлам.
+   */
+  const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${token.value}` })
+
+  /**
+   * Ошибки не глотает: вызывающий раскладывает их через `describeRegisterFailure`
+   * или `describeLoginFailure` — текст для пользователя зависит от экрана.
    */
   const register = async (credentials: Credentials): Promise<void> => {
     const { token: issued } = await $fetch<TokenResponse>('/auth/register', {
@@ -37,5 +50,48 @@ export const useAuth = () => {
     token.value = issued
   }
 
-  return { token: readonly(token), isAuthenticated, register }
+  const login = async (credentials: Credentials): Promise<void> => {
+    const { token: issued } = await $fetch<TokenResponse>('/auth/login', {
+      baseURL: apiUrl,
+      method: 'POST',
+      body: { email: credentials.email.trim(), password: credentials.password },
+    })
+
+    token.value = issued
+  }
+
+  /**
+   * Адрес берётся у api, а не из payload'а токена: декодировать JWT на клиенте
+   * означало бы завязаться на форму payload'а, которую ничто не фиксирует
+   * контрактом, — и показывать адрес, не проверив подпись.
+   */
+  const fetchUser = async (): Promise<AuthUser> => {
+    const account = await $fetch<AuthUser>('/auth/me', {
+      baseURL: apiUrl,
+      headers: authHeaders(),
+    })
+
+    user.value = account
+
+    return account
+  }
+
+  /** Локальный выход: серверной сессии нет, JWT доживает свой `exp` сам. */
+  const logout = async (): Promise<void> => {
+    token.value = null
+    user.value = null
+
+    await navigateTo('/login')
+  }
+
+  return {
+    token: readonly(token),
+    user,
+    isAuthenticated,
+    authHeaders,
+    register,
+    login,
+    fetchUser,
+    logout,
+  }
 }
