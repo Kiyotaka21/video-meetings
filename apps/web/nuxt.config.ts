@@ -26,6 +26,8 @@ export default defineNuxtConfig({
   routeRules: {
     '/': { prerender: true },
     '/pricing': { prerender: true },
+    // Публичная точка входа: форма гидратируется, но HTML отдаётся статикой.
+    '/register': { prerender: true },
     '/blog/**': { isr: 3600 },
     '/room/**': { ssr: false },
     '/app/**': { ssr: false },
