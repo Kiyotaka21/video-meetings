@@ -25,13 +25,15 @@ UI для `POST /meetings` не заведён.
 Все команды запускаются из корня; в воркспейсы попадают через `bun run --filter`.
 
 ```bash
-bun install               # postinstall в web сам выполнит nuxt prepare
+bun install               # postinstall в web сам выполнит nuxt prepare,
+                          # prepare поставит git-хуки husky
 bun run dev               # web (5173) + api (3000) параллельно
 bun run dev:web           # по отдельности
 bun run dev:api
 bun run build             # оба приложения
 bun run check             # format:check + lint + typecheck — общий гейт
 bun run test              # bun test в apps/api; требует поднятой базы
+bun run prepare           # husky: переставить git-хуки (это же делает bun install)
 bun run db:up             # Postgres в docker-compose, с ожиданием healthcheck
 bun run db:down           # остановить (том с данными остаётся)
 bun run db:logs           # docker compose logs -f postgres
@@ -66,10 +68,13 @@ bun run --filter @video-meetings/api test:watch
 ```
 
 `bun run check` тесты **не** запускает: гейт остаётся быстрым и не требует
-Docker. В CI тесты — отдельный шаг после `check`.
+Docker. В CI тесты — отдельный шаг после `check`. Зато их гоняет pre-commit-хук
+husky, так что для коммита база нужна — см. «Коммит проходит через husky».
 
 Разработка идёт от тестов: сначала падающий тест на контракт, потом реализация.
-Красные тесты в репозитории — нормальное промежуточное состояние, а не поломка.
+Красные тесты в репозитории — нормальное промежуточное состояние, а не поломка,
+но pre-commit-хук их не пропустит: закоммитить такой тест можно только через
+`git commit --no-verify`.
 
 ## Как устроена связность
 
@@ -78,6 +83,31 @@ Docker. В CI тесты — отдельный шаг после `check`.
 `apps/web` (браузерные globals) и блок для `apps/api` (node + `Bun`). Не заводи
 per-app конфиги — глобальный `bun run lint` рассчитан на то, что конфиг один.
 Почему в блоке `app/web` выключены два правила — объяснено в `apps/web/CLAUDE.md`.
+
+**Коммит проходит через husky: линт и тесты.** Git-хуки лежат в `.husky/`,
+`core.hooksPath` указывает на `.husky/_`, а прописывает его скрипт `prepare`, то
+есть обычный `bun install`. На свежем клоне до установки зависимостей хука нет и
+коммит уходит без проверок — это не поломка, а следствие того, что git не умеет
+версионировать `.git/hooks`.
+
+`.husky/pre-commit` делает две вещи: `bun run lint` по всему репозиторию и
+`bun run test` (тесты api). Четыре неочевидности:
+
+- **Гейт смотрит рабочее дерево, а не индекс.** `lint-staged` не подключён,
+  `eslint .` проходит по всем файлам, включая незастейдженные правки. Коммит части
+  изменений упадёт из-за ошибки в файле, который в этот коммит не входит.
+- **`format:check` и `typecheck` в хук не вошли** — они остались в `bun run check`.
+  Гейт держится коротким: `vue-tsc` по `web` добавил бы к каждому коммиту заметно
+  больше, чем `eslint` и `bun test` вместе.
+- **Тестам нужна поднятая база**, поэтому хук сначала спрашивает у compose, запущен
+  ли контейнер `postgres`, и падает с внятным «подними `bun run db:up`». Без этой
+  проверки коммит валился бы стеной SQL-ошибок Prisma, в которой причина не видна.
+- **Коммитится только `.husky/pre-commit`.** Каталог `.husky/_/` husky генерирует
+  сам и кладёт туда собственный `.gitignore` с `*` — в корневой `.gitignore`
+  дописывать его не нужно.
+
+Обойти гейт — `git commit --no-verify`. Это исключение (например, сохранить
+заведомо красный тест по ходу TDD), а не рабочий режим.
 
 **Правки агента форматирует хук, а не человек.** `.claude/settings.json` вешает на
 `PostToolUse` (matcher `Write|Edit|NotebookEdit`) скрипт
@@ -244,6 +274,7 @@ payload'а не зафиксирована ни одним тестом, а по
 | Мажорное обновление зависимости (TS, Nuxt, Elysia)     | номера версий в `README.md` и обоих `CLAUDE.md`                                                                                |
 | Тесты появились в новом воркспейсе или сменился раннер | раздел «Тесты» в корневом `CLAUDE.md`, раздел «Тесты» в `apps/*/CLAUDE.md`, «Скрипты» в `README.md`                            |
 | Новый или изменённый хук Claude Code                   | раздел «Правки агента форматирует хук» корневого `CLAUDE.md`                                                                   |
+| Правка `.husky/pre-commit` или новый git-хук           | раздел «Коммит проходит через husky» корневого `CLAUDE.md`                                                                     |
 | Новый MCP-сервер в `.mcp.json`                         | раздел «Playwright MCP объявлен в `.mcp.json`» корневого `CLAUDE.md`, раздел «Тулинг» в `README.md`                            |
 | Правка схемы `credentials` или `JWT_EXPIRES_IN` на api | `apps/web/app/utils/auth.ts` и `useAuth.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                       |
 | Новый маршрут `/auth/*` или поле в его ответе          | `apps/web/app/types/auth.ts`, `useAuth.ts`, тест в `apps/api/tests/auth.e2e.test.ts`, таблица маршрутов в `apps/api/CLAUDE.md` |

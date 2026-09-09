@@ -1,0 +1,16 @@
+set -e
+
+# Гейт перед коммитом: линт по всему репозиторию и тесты api.
+# Обойти в исключительном случае — git commit --no-verify.
+
+bun run lint
+
+# Тесты api ходят в настоящую базу, моков нет: без Postgres они падают на SQL,
+# и настоящая причина тонет в выводе Prisma. Поэтому проверяем контейнер заранее.
+if ! docker compose ps --status running --services 2>/dev/null | grep -qx postgres; then
+  echo "pre-commit: postgres из docker-compose не поднят (или Docker недоступен)." >&2
+  echo "            Тесты без базы не прогнать: bun run db:up" >&2
+  exit 1
+fi
+
+bun run test

@@ -18,7 +18,7 @@
 ## Установка
 
 ```bash
-bun install            # postinstall выполнит nuxt prepare и prisma generate
+bun install            # postinstall: nuxt prepare и prisma generate; prepare: хуки husky
 cp apps/api/.env.example apps/api/.env
 cp apps/web/.env.example apps/web/.env
 bun run db:up          # Postgres в контейнере, дефолты зашиты в docker-compose.yml
@@ -33,27 +33,28 @@ bun run db:migrate     # накатить схему (таблица users)
 
 ## Скрипты (корень)
 
-| Команда                | Что делает                               |
-| ---------------------- | ---------------------------------------- |
-| `bun run dev`          | Поднимает web и api параллельно          |
-| `bun run dev:web`      | Только фронтенд                          |
-| `bun run dev:api`      | Только бэкенд (`--watch`)                |
-| `bun run build`        | Сборка обоих приложений                  |
-| `bun run start:web`    | Nitro-сервер из `.output`                |
-| `bun run start:api`    | Запуск api в production-режиме           |
-| `bun run db:up`        | Поднимает Postgres и ждёт healthcheck    |
-| `bun run db:down`      | Останавливает контейнер (том остаётся)   |
-| `bun run db:logs`      | Логи Postgres в режиме `-f`              |
-| `bun run db:migrate`   | `prisma migrate dev` — схема и миграции  |
-| `bun run db:generate`  | `prisma generate` — пересборка клиента   |
-| `bun run typecheck`    | `nuxt typecheck` / `tsc` по воркспейсам  |
-| `bun run test`         | `bun test` в `apps/api` (нужна база)     |
-| `bun run lint`         | ESLint по всему репозиторию              |
-| `bun run lint:fix`     | ESLint с автофиксом                      |
-| `bun run format`       | Prettier `--write`                       |
-| `bun run format:check` | Prettier `--check`                       |
-| `bun run check`        | format:check + lint + typecheck (для CI) |
-| `bun run clean`        | Удаляет `node_modules`, `.nuxt`, сборки  |
+| Команда                | Что делает                                        |
+| ---------------------- | ------------------------------------------------- |
+| `bun run dev`          | Поднимает web и api параллельно                   |
+| `bun run dev:web`      | Только фронтенд                                   |
+| `bun run dev:api`      | Только бэкенд (`--watch`)                         |
+| `bun run build`        | Сборка обоих приложений                           |
+| `bun run start:web`    | Nitro-сервер из `.output`                         |
+| `bun run start:api`    | Запуск api в production-режиме                    |
+| `bun run db:up`        | Поднимает Postgres и ждёт healthcheck             |
+| `bun run db:down`      | Останавливает контейнер (том остаётся)            |
+| `bun run db:logs`      | Логи Postgres в режиме `-f`                       |
+| `bun run db:migrate`   | `prisma migrate dev` — схема и миграции           |
+| `bun run db:generate`  | `prisma generate` — пересборка клиента            |
+| `bun run typecheck`    | `nuxt typecheck` / `tsc` по воркспейсам           |
+| `bun run test`         | `bun test` в `apps/api` (нужна база)              |
+| `bun run lint`         | ESLint по всему репозиторию                       |
+| `bun run lint:fix`     | ESLint с автофиксом                               |
+| `bun run format`       | Prettier `--write`                                |
+| `bun run format:check` | Prettier `--check`                                |
+| `bun run check`        | format:check + lint + typecheck (для CI)          |
+| `bun run prepare`      | Husky: ставит git-хуки (зовётся из `bun install`) |
+| `bun run clean`        | Удаляет `node_modules`, `.nuxt`, сборки           |
 
 ## База данных
 
@@ -111,7 +112,10 @@ bun run test       # алиас на bun run --filter @video-meetings/api test
 bun run --filter @video-meetings/api test:watch
 ```
 
-`bun run check` тесты не запускает — он должен работать без Docker.
+`bun run check` тесты не запускает — он должен работать без Docker. А вот
+pre-commit-хук husky запускает: перед каждым коммитом идут `bun run lint` и
+`bun run test`, поэтому Postgres для коммита должен быть поднят. Обойти в
+исключительном случае — `git commit --no-verify`.
 
 Проект разрабатывается от тестов: сначала контракт в виде падающего теста, потом
 реализация. Тесты в `apps/api/tests/` — исполняемая спецификация API:
@@ -197,6 +201,10 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 - **Prettier 3** — `.prettierrc.json`, форматирование отделено от линтинга. Файлы,
   которые пишет Claude Code, форматируются автоматически хуком из
   `.claude/settings.json` — детали в корневом `CLAUDE.md`.
+- **Husky 9** — git-хуки в `.husky/`, ставятся скриптом `prepare` при `bun install`.
+  `pre-commit` гоняет `bun run lint` и `bun run test`; тестам нужна поднятая база,
+  так что хук сначала проверяет контейнер `postgres`. Подробности — в корневом
+  `CLAUDE.md`.
 - **Nuxt UI 4** — компоненты на Reka UI и Tailwind CSS 4. Брендинг в
   `apps/web/app/app.config.ts`, токены в `apps/web/app/assets/css/main.css`. В разметке
   только семантические цвета (`text-muted`, `bg-elevated`), не raw-палитра Tailwind.
