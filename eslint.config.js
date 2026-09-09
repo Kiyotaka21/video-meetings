@@ -18,6 +18,7 @@ export default tseslint.config(
       '**/.agents/**',
       '**/.claude/skills/**',
       '**/coverage/**',
+      '**/generated/**',
       '**/*.tsbuildinfo',
     ],
   },

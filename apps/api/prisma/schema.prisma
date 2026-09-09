@@ -1,0 +1,43 @@
+// Схема Prisma для @video-meetings/api.
+// URL базы задаётся не здесь, а в prisma.config.ts — так требует Prisma 7.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid(7))
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  meetings Meeting[]
+
+  @@map("users")
+}
+
+model Meeting {
+  id    String   @id @default(uuid(7))
+  title String
+  date  DateTime
+
+  /// Адреса приглашённых, не ссылки на users: приглашать можно и тех, кто ещё не
+  /// зарегистрирован. Появятся приглашения со статусом — это станет отдельной таблицей.
+  participants String[]
+
+  ownerId String @map("owner_id")
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Список всегда читается как «встречи владельца по возрастанию даты».
+  @@index([ownerId, date])
+  @@map("meetings")
+}

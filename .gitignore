@@ -58,3 +58,6 @@ Thumbs.db
 # Снапшоты, логи и скриншоты MCP-сервера Playwright: он пишет их в cwd
 # при каждом вызове браузера.
 .playwright-mcp/
+
+# Клиент Prisma генерируется из схемы (bun run db:generate)
+apps/api/generated/

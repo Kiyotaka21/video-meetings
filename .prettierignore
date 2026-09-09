@@ -15,3 +15,6 @@ bun.lockb
 
 # Артефакты MCP-сервера Playwright
 .playwright-mcp
+
+# Сгенерированный клиент Prisma
+apps/api/generated

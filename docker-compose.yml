@@ -1,0 +1,33 @@
+# Локальная инфраструктура для разработки. Приложения (web, api) запускаются
+# нативно через `bun run dev` — в контейнерах живут только stateful-сервисы.
+name: video-meetings
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: video-meetings-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-video_meetings}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-video_meetings}
+      POSTGRES_DB: ${POSTGRES_DB:-video_meetings}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    # В postgres:18 PGDATA переехал в /var/lib/postgresql/18/docker, а образ
+    # объявляет VOLUME на /var/lib/postgresql — том вешается на родителя, иначе
+    # анонимный том перекрыл бы данные при пересоздании контейнера.
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-video_meetings} -d ${POSTGRES_DB:-video_meetings}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:

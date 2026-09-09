@@ -1,0 +1,4 @@
+[test]
+# setup.ts должен отработать раньше, чем тест импортирует src/app.ts:
+# src/config/env.ts читает Bun.env один раз, на этапе загрузки модуля.
+preload = ["./tests/setup.ts"]

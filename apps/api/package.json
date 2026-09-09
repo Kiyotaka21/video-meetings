@@ -10,16 +10,27 @@
     "start": "NODE_ENV=production bun run src/index.ts",
     "build": "bun build src/index.ts --target bun --outdir dist --minify",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "db:generate": "bunx --bun prisma generate",
+    "db:migrate": "bunx --bun prisma migrate dev",
+    "db:deploy": "bunx --bun prisma migrate deploy",
+    "db:studio": "bunx --bun prisma studio",
+    "postinstall": "bunx --bun prisma generate",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write src/"
   },
   "dependencies": {
     "@elysiajs/cors": "^1.4.2",
+    "@elysiajs/jwt": "^1.4.2",
     "@elysiajs/openapi": "^1.4.16",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
     "elysia": "^1.4.30"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.0"
+    "@types/bun": "^1.4.0",
+    "prisma": "^7.10.0"
   }
 }
