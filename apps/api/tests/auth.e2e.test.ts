@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto'
+
 import { describe, expect, it } from 'bun:test'
 
-import { postJson } from './helpers/http'
-import { decodeJwt } from './helpers/jwt'
-import { uniqueEmail } from './helpers/users'
+import { getJson, postJson } from './helpers/http'
+import { decodeJwt, signJwt } from './helpers/jwt'
+import { registerUser, uniqueEmail } from './helpers/users'
 import { TEST_JWT_SECRET } from './setup'
 
 /**
@@ -14,6 +16,7 @@ import { TEST_JWT_SECRET } from './setup'
 
 const REGISTER = '/auth/register'
 const LOGIN = '/auth/login'
+const ME = '/auth/me'
 
 const PASSWORD = 'correct-horse-battery'
 
@@ -222,4 +225,96 @@ describe('POST /auth/login', () => {
       expect(response.body).not.toHaveProperty('token')
     })
   }
+})
+
+describe('GET /auth/me', () => {
+  const secondsFromNow = (seconds: number): number => Math.floor(Date.now() / 1000) + seconds
+
+  /** Ровно эти поля и ничего больше: клиент не должен видеть служебных колонок. */
+  const ME_FIELDS = ['email', 'id']
+
+  it('отдаёт id и e-mail владельца токена', async () => {
+    const user = await registerUser()
+
+    const response = await getJson(ME, user.token)
+
+    expect(response.status).toBe(200)
+    expect(Object.keys(response.body as object).sort()).toEqual(ME_FIELDS)
+
+    const { id, email } = response.body as { id: string; email: string }
+    expect(email).toBe(user.email)
+    // id берётся из базы, а `sub` — из токена; расхождение означало бы, что
+    // маршрут отвечает не про того пользователя, чей токен пришёл.
+    expect(id).toBe(subjectOf(user.token))
+  })
+
+  it('не отдаёт хеш пароля и служебные отметки', async () => {
+    const user = await registerUser()
+
+    const response = await getJson(ME, user.token)
+
+    expect(response.body).not.toHaveProperty('passwordHash')
+    expect(response.body).not.toHaveProperty('password_hash')
+    expect(response.body).not.toHaveProperty('createdAt')
+  })
+
+  it('отдаёт нормализованный e-mail, а не то, что прислали при регистрации', async () => {
+    const email = uniqueEmail()
+    const registered = await postJson(REGISTER, { email: email.toUpperCase(), password: PASSWORD })
+    expect(registered.status).toBe(201)
+
+    const response = await getJson(ME, tokenOf(registered.body))
+
+    expect(response.status).toBe(200)
+    expect((response.body as { email: string }).email).toBe(email)
+  })
+
+  it('различает пользователей: каждый видит только свой адрес', async () => {
+    const first = await registerUser()
+    const second = await registerUser()
+
+    const forFirst = await getJson(ME, first.token)
+    const forSecond = await getJson(ME, second.token)
+
+    expect((forFirst.body as { email: string }).email).toBe(first.email)
+    expect((forSecond.body as { email: string }).email).toBe(second.email)
+  })
+
+  it('без заголовка Authorization → 401', async () => {
+    const response = await getJson(ME)
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('email')
+  })
+
+  const rejectedTokens: Array<[string, string]> = [
+    ['мусор вместо токена', 'not-a-jwt-at-all'],
+    [
+      'подпись чужим секретом',
+      signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
+    ],
+    ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
+    ['подпись нашим секретом, но без sub', signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
+  ]
+
+  for (const [name, token] of rejectedTokens) {
+    it(`отклоняет: ${name}`, async () => {
+      const response = await getJson(ME, token)
+
+      expect(response.status).toBe(401)
+      expect(response.body).not.toHaveProperty('email')
+    })
+  }
+
+  it('годная подпись, но такого пользователя нет → 401, а не 404', async () => {
+    // Подпись наша, `sub` формата uuid — guard такой токен пропускает. Для
+    // клиента это ровно та же ситуация, что истёкший токен: сессии больше нет,
+    // и правило «401 → выйти и на /login» должно работать без второй ветки.
+    const token = signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, TEST_JWT_SECRET)
+
+    const response = await getJson(ME, token)
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('email')
+  })
 })

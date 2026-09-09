@@ -11,6 +11,9 @@ const credentials = t.Object({
 
 const tokenResponse = t.Object({ token: t.String() })
 const messageResponse = t.Object({ message: t.String() })
+const userResponse = t.Object({ id: t.String(), email: t.String() })
+
+const security = [{ bearerAuth: [] }]
 
 /**
  * Один и тот же ответ на «нет такого пользователя» и «неверный пароль»: разные
@@ -66,6 +69,40 @@ export const authenticated = new Elysia({ name: 'authenticated' })
 
     return { userId: payload.sub }
   })
+
+/**
+ * `/auth/me` — единственный закрытый роут в этом модуле, поэтому он вынесен в
+ * отдельный инстанс, а не дописан к `authModule` после `.use(authenticated)`.
+ * Hook'и Elysia действуют на роуты, объявленные после них: при дописывании
+ * порядок строк в файле начал бы решать, открыт `/auth/register` или закрыт.
+ * Здесь граница видна глазами — под guard'ом ровно то, что внутри инстанса.
+ */
+const currentUserRoutes = new Elysia({ name: 'auth.me' }).use(authenticated).get(
+  '/me',
+  async ({ userId, status }) => {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true },
+    })
+
+    // Подпись наша и `sub` на месте, но пользователя нет: учётку удалили либо
+    // токен выпущен против другой базы. Для клиента это та же мёртвая сессия,
+    // что и истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
+    // /login» покрывало все случаи одной веткой, без разбора 404.
+    if (!user) {
+      return status(401, { message: 'Unauthorized' })
+    }
+
+    return user
+  },
+  {
+    response: {
+      200: userResponse,
+      401: messageResponse,
+    },
+    detail: { summary: 'Get the current user', security },
+  },
+)
 
 export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .use(jwtPlugin)
@@ -125,3 +162,4 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       detail: { summary: 'Log in with e-mail and password' },
     },
   )
+  .use(currentUserRoutes)
