@@ -103,3 +103,17 @@ export const describeMeetingsFailure = (error: unknown): string => {
       return 'Не удалось загрузить встречи. Попробуйте обновить список.'
   }
 }
+
+/**
+ * Отказ `GET /meetings/:id` на странице встречи. 404 сюда не попадает: чужая и
+ * несуществующая встреча — это отдельное состояние страницы с объяснением и
+ * дорогой назад, а не сообщение об ошибке загрузки.
+ */
+export const describeMeetingFailure = (error: unknown): string => {
+  switch (statusOf(error)) {
+    case undefined:
+      return NO_CONNECTION_MESSAGE
+    default:
+      return 'Не удалось загрузить встречу. Попробуйте ещё раз.'
+  }
+}

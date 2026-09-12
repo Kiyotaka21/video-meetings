@@ -32,7 +32,21 @@ const hiddenLabel = computed(() => `ещё ${plural(hiddenCount.value, PARTICIPA
 <template>
   <li class="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
     <div class="flex min-w-0 flex-col gap-1">
-      <h3 class="font-medium break-words text-highlighted">{{ props.meeting.title }}</h3>
+      <h3 class="font-medium break-words text-highlighted">
+        <!-- Ссылка на самом названии, а не на всей строке: строка содержит ещё
+             и бейджи участников, а вложенных интерактивных элементов в ссылке
+             быть не должно.
+
+             Индикатор фокуса задан руками — у голого `NuxtLink`, в отличие от
+             `UButton`, своего нет. Вертикальные отступы с компенсирующим
+             минусом поднимают цель нажатия до 24px, не сдвигая вёрстку. -->
+        <NuxtLink
+          :to="`/meetings/${props.meeting.id}`"
+          class="-my-1 inline-block rounded-(--ui-radius) py-1 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {{ props.meeting.title }}
+        </NuxtLink>
+      </h3>
 
       <!-- datetime в машинном виде: текст локализован и в разборе не поможет. -->
       <time :datetime="props.meeting.date" class="text-sm text-muted">
