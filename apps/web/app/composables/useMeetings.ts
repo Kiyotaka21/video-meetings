@@ -19,5 +19,15 @@ export const useMeetings = () => {
       headers: authHeaders(),
     })
 
-  return { fetchMeetings }
+  /**
+   * Одна встреча. Чужая отвечает тем же 404, что и несуществующая, — api
+   * намеренно не подтверждает, что такая встреча вообще есть.
+   */
+  const fetchMeeting = (id: string): Promise<Meeting> =>
+    $fetch<Meeting>(`/meetings/${id}`, {
+      baseURL: apiUrl,
+      headers: authHeaders(),
+    })
+
+  return { fetchMeetings, fetchMeeting }
 }

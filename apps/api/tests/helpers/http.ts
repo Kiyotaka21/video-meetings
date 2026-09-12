@@ -10,6 +10,9 @@ export interface ApiResponse {
 /**
  * Гоняет запрос через `app.handle`, без открытия порта, но по всему конвейеру
  * Elysia: CORS, валидация схем, обработчики ошибок, сериализация ответа.
+ *
+ * Хост обязан быть с точкой: на `http://x/...` Bun отвечает 404 на любой
+ * маршрут, и тест падает не по делу.
  */
 export const request = async (path: string, init?: RequestInit): Promise<ApiResponse> => {
   const response = await app.handle(new Request(`http://localhost${path}`, init))
@@ -38,3 +41,28 @@ export const postJson = (path: string, payload: unknown, token?: string): Promis
 
 export const getJson = (path: string, token?: string): Promise<ApiResponse> =>
   request(path, { method: 'GET', headers: authorization(token) })
+
+export interface UploadedFile {
+  /** Имя, каким его «выбрал пользователь»: в заголовок уходит percent-encoded. */
+  name: string
+  /** Заявленный тип. `undefined` — клиент не прислал `Content-Type` вовсе. */
+  type?: string
+  /** Сырые байты файла: строка, Uint8Array или поток — как их принимает `Request`. */
+  body: RequestInit['body']
+}
+
+/**
+ * Загрузка файла так же, как её шлёт браузер: тело — сырые байты, имя и тип —
+ * заголовками. Значение заголовка это байты Latin-1, поэтому кириллическое имя
+ * не собрать напрямую — `new Request` бросит исключение ещё до `app.handle`.
+ */
+export const postFile = (path: string, file: UploadedFile, token?: string): Promise<ApiResponse> =>
+  request(path, {
+    method: 'POST',
+    headers: {
+      'x-file-name': encodeURIComponent(file.name),
+      ...(file.type === undefined ? {} : { 'content-type': file.type }),
+      ...authorization(token),
+    },
+    body: file.body,
+  })

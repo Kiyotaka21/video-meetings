@@ -37,7 +37,62 @@ model Meeting {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  files MeetingFile[]
+
   // Список всегда читается как «встречи владельца по возрастанию даты».
   @@index([ownerId, date])
   @@map("meetings")
+}
+
+/// Группа формата: запись встречи (видео или аудио) либо сопутствующий документ.
+/// От неё зависят лимит размера и то, разворачивается ли плеер.
+enum FileKind {
+  recording
+  document
+
+  @@map("file_kind")
+}
+
+/// Место под будущую обработку записи. Сейчас файл всегда остаётся в `uploaded`:
+/// остальные значения заведены, чтобы транскрибация не потребовала миграции.
+enum FileStatus {
+  uploaded
+  processing
+  ready
+  failed
+
+  @@map("file_status")
+}
+
+model MeetingFile {
+  id String @id @default(uuid(7))
+
+  /// Имя, под которым файл пришёл от пользователя, — включая `../` и кириллицу.
+  /// В путь на диске оно не попадает: путь целиком генерирует сервер.
+  name String
+
+  /// BigInt, а не Int: максимум Int в Postgres — 2 147 483 647 байт, и файл
+  /// ровно на 2 ГиБ туда уже не влезает. Наружу уходит числом (см. `toResponse`).
+  size BigInt
+
+  /// Тип, заявленный клиентом. Доверенным он не считается: при отдаче
+  /// `Content-Type` берётся из таблицы форматов по расширению.
+  mimeType String @map("mime_type")
+
+  kind   FileKind
+  status FileStatus @default(uploaded)
+
+  /// Путь относительно UPLOAD_DIR — `<meetingId>/<id><ext>`. Абсолютный зависит
+  /// от машины, и перенос каталога загрузок ломал бы все строки разом.
+  path String
+
+  meetingId String  @map("meeting_id")
+  meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Список всегда читается как «файлы встречи по дате загрузки».
+  @@index([meetingId, createdAt])
+  @@map("meeting_files")
 }

@@ -34,6 +34,9 @@ export default defineNuxtConfig({
     '/login': { prerender: true },
     '/register': { prerender: true },
     '/blog/**': { isr: 3600 },
+    // Страница встречи — тот же кабинет, только про одну встречу: за
+    // авторизацией и с файлами владельца, индексировать нечего.
+    '/meetings/**': { ssr: false, headers: { 'x-robots-tag': 'noindex' } },
     '/room/**': { ssr: false },
     // Кабинет переехал с `/app` на `/`; правило держим, чтобы сохранённые
     // ссылки и закладки не отдавали 404.

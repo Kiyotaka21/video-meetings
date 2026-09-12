@@ -24,3 +24,7 @@ bun.lockb
 
 # Сгенерированный клиент Prisma
 apps/api/generated
+
+# Загруженные файлы встреч: среди форматов есть .md и .csv — Prettier принялся бы
+# форматировать чужие файлы, а bun run check падал бы на них.
+apps/api/.uploads

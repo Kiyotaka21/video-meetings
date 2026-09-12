@@ -22,7 +22,7 @@ bun install            # postinstall: nuxt prepare и prisma generate; prepare: 
 cp apps/api/.env.example apps/api/.env
 cp apps/web/.env.example apps/web/.env
 bun run db:up          # Postgres в контейнере, дефолты зашиты в docker-compose.yml
-bun run db:migrate     # накатить схему (таблица users)
+bun run db:migrate     # накатить схему (users, meetings, meeting_files)
 ```
 
 В `apps/api/.env` обязательно задать свой `JWT_SECRET` — дефолта у него нет, без
@@ -85,10 +85,16 @@ docker compose down -v                                   # снести вмес
 миграции в `apps/api/prisma/migrations/` (коммитятся), строка подключения — в
 `apps/api/.env`.
 
-| Таблица    | Что лежит                                                                          |
-| ---------- | ---------------------------------------------------------------------------------- |
-| `users`    | `id`, `email` (unique), `password_hash`, `created_at`, `updated_at`                |
-| `meetings` | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки |
+| Таблица         | Что лежит                                                                                            |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| `users`         | `id`, `email` (unique), `password_hash`, `created_at`, `updated_at`                                  |
+| `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                   |
+| `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id` |
+
+**Состояние теперь в двух местах.** В `meeting_files` лежат только метаданные;
+сам файл — на диске api, в каталоге из `UPLOAD_DIR` (по умолчанию
+`apps/api/.uploads`, в git не попадает и в compose не заведён). Дамп базы без
+этого каталога бесполезен, переезд на другую машину переносит оба.
 
 ```bash
 bun run db:migrate                     # создать и применить миграцию по схеме
@@ -124,6 +130,7 @@ pre-commit-хук husky запускает: перед каждым коммит
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | `auth.e2e.test.ts`     | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT |
 | `meetings.e2e.test.ts` | встречи: guard по токену, изоляция между пользователями, формат дат                |
+| `files.e2e.test.ts`    | файлы встречи: загрузка потоком, метаданные, список, чужая встреча и 401           |
 
 Тесты не чистят за собой базу, а генерируют уникальные адреса, так что `users` и
 `meetings` после прогонов заполняются мусором. Вычистить: `docker compose down -v`
@@ -140,6 +147,7 @@ Nuxt настроен на гибридный рендеринг — `routeRules
 | `/login`          | `prerender: true`             | Вход: публичная точка входа, HTML статикой         |
 | `/register`       | `prerender: true`             | То же для регистрации                              |
 | `/blog/**`        | `isr: 3600`                   | Кэш на час, страниц пока нет                       |
+| `/meetings/**`    | `ssr: false` + `X-Robots-Tag` | Страница встречи с файлами владельца               |
 | `/room/**`        | `ssr: false`                  | WebRTC и `getUserMedia` требуют реального браузера |
 | `/app`, `/app/**` | `redirect: '/'`               | Кабинет переехал на `/`, старые ссылки не 404      |
 
@@ -153,8 +161,8 @@ ls apps/web/.output/public          # pricing/, login/ и register/
 grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 ```
 
-`/`, `/room/**` и `/app/**` в `.output/public` не попадают — это ожидаемо, они
-отдаются клиентской оболочкой.
+`/`, `/meetings/**`, `/room/**` и `/app/**` в `.output/public` не попадают — это
+ожидаемо, они отдаются клиентской оболочкой.
 
 ## Структура
 
@@ -289,3 +297,24 @@ curl http://localhost:3000/meetings/<id> -H "authorization: Bearer $TOKEN"
 встреча отвечает тем же `404`, что и несуществующая, — существование чужих
 записей не подтверждается. Без токена (или с негодным) любой маршрут `/meetings`
 отдаёт `401`.
+
+Файлы встречи. Тело запроса — сами байты файла, без `multipart`: имя приезжает
+заголовком `X-File-Name`, тип — обычным `Content-Type`.
+
+```bash
+curl -X POST http://localhost:3000/meetings/<id>/files \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'x-file-name: notes.md' -H 'content-type: text/markdown' \
+  --data-binary @notes.md
+# 201 {"id":"...","name":"notes.md","size":1234,"mimeType":"text/markdown","kind":"document","status":"uploaded","createdAt":"..."}
+
+curl http://localhost:3000/meetings/<id>/files -H "authorization: Bearer $TOKEN"
+# 200 [...] — файлы этой встречи по дате загрузки
+```
+
+Имя в заголовке обязано быть percent-encoded (`encodeURIComponent`): значение
+HTTP-заголовка — байты Latin-1, и кириллическое имя в него не помещается вовсе.
+Файл пишется на диск потоком, в каталог из `UPLOAD_DIR`, под именем, которое
+генерирует api; исходное имя остаётся только в метаданных. Лимиты на размер и
+формат, отдача файла и удаление — следующие фазы, см.
+`docs/plan-meeting-file-upload.md`.
