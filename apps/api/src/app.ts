@@ -4,6 +4,7 @@ import { Elysia } from 'elysia'
 
 import { env, isProduction } from './config/env'
 import { authModule } from './modules/auth'
+import { filesModule } from './modules/files'
 import { healthModule } from './modules/health'
 import { meetingsModule } from './modules/meetings'
 
@@ -35,5 +36,6 @@ export const app = new Elysia()
   .use(healthModule)
   .use(authModule)
   .use(meetingsModule)
+  .use(filesModule)
 
 export type App = typeof app

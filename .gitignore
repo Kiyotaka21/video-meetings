@@ -61,3 +61,7 @@ Thumbs.db
 
 # Клиент Prisma генерируется из схемы (bun run db:generate)
 apps/api/generated/
+
+# Загруженные файлы встреч: каталог задаётся UPLOAD_DIR, дефолт — apps/api/.uploads.
+# Часть состояния приложения живёт здесь, мимо compose и мимо репозитория.
+apps/api/.uploads/
