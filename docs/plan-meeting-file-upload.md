@@ -37,28 +37,28 @@ PRD оставлял три места с несколькими прочтен�
 
 **Задачи**:
 
-- [ ] Модель `MeetingFile` в `prisma/schema.prisma`: исходное имя, размер
+- [x] Модель `MeetingFile` в `prisma/schema.prisma`: исходное имя, размер
       (`BigInt` — 2 ГБ не влезают в 32-битный `Int`), MIME-тип, группа
       (`FileKind`), статус (`FileStatus`: `uploaded`, `processing`, `ready`,
       `failed`), относительный путь, `meetingId` с `onDelete: Cascade`, индекс
       `(meeting_id, created_at)`; миграция `bun run db:migrate` в том же коммите.
       Туда же `UPLOAD_DIR` в `src/config/env.ts`, `apps/api/.env.example`,
       таблица окружения в `apps/api/CLAUDE.md` и каталог в `.gitignore`.
-- [ ] `POST /meetings/:id/files` — новый модуль `src/modules/files.ts` под
+- [x] `POST /meetings/:id/files` — новый модуль `src/modules/files.ts` под
       `.use(authenticated)`, подключённый в `app.ts`: тело не парсится
       (`parse: 'none'`), поток пишется через `Bun.file(dest).writer()`, имя и тип
       приходят заголовками, путь на диске генерирует сервер
       (`<UPLOAD_DIR>/<meetingId>/<fileId><ext>`) — исходное имя живёт только в
       метаданных. Ответ 201 с метаданными, чужая встреча — 404, без токена — 401.
-- [ ] `GET /meetings/:id/files` — имя, размер, MIME-тип, группа, статус и
+- [x] `GET /meetings/:id/files` — имя, размер, MIME-тип, группа, статус и
       `createdAt` в ISO-8601 UTC, сортировка по дате загрузки. Размер наружу
       уходит числом: `BigInt` не сериализуется в JSON и роняет ответ.
-- [ ] Страница `apps/web/app/pages/meetings/[id].vue`: карточка встречи из
+- [x] Страница `apps/web/app/pages/meetings/[id].vue`: карточка встречи из
       `GET /meetings/:id`, блок «Файлы» со списком, кнопка выбора файла и
       композабл `useMeetingFiles`. Плюс `routeRules` для `/meetings/**`
       (`ssr: false` и `X-Robots-Tag`), ссылка со строки дашборда (`MeetingItem`)
       и обработка 401 как в кабинете: `isUnauthorized` → `logout()` → `/login`.
-- [ ] `apps/api/tests/files.e2e.test.ts`: загрузка документа с метаданными,
+- [x] `apps/api/tests/files.e2e.test.ts`: загрузка документа с метаданными,
       список, чужая встреча 404, обе операции без токена 401. `UPLOAD_DIR`
       перекрывается временным каталогом в `tests/setup.ts` (до импорта
       приложения — `env.ts` читает `Bun.env` один раз) и убирается после прогона.
