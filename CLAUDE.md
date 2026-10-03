@@ -13,9 +13,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 все. Создание встреч пока только на api — UI для `POST /meetings` не заведён, и
 встречу для проверок заводят формой Scalar на `/docs`.
 
-Загрузка файлов делается по фазам из `docs/plan-meeting-file-upload.md`: готова
-первая — файл доезжает от браузера до диска и возвращается в списке. Лимитов,
-отдачи файла, удаления, прогресса и плеера ещё нет.
+Загрузка файлов делается по фазам из `docs/plan-meeting-file-upload.md`: готовы
+первые две — файл доезжает от браузера до диска и возвращается в списке, а api
+сам отбивает чужой формат (415), лишний размер (413) и 21-й файл встречи (409).
+Отдачи файла, удаления, прогресса, проверки до отправки и плеера ещё нет.
 
 | Воркспейс             | Путь       | Стек                        | Порт |
 | --------------------- | ---------- | --------------------------- | ---- |
@@ -236,7 +237,7 @@ percent-encoding.** `POST /meetings/:id/files` не парсит тело (`mult
 него не помещается ни на клиенте (`setRequestHeader` бросает `TypeError`), ни на
 сервере (`new Headers` бросает там же). Контракт — `encodeURIComponent` в
 `apps/web/app/composables/useMeetingFiles.ts` и `decodeURIComponent` в
-`apps/api/src/modules/files.ts`; снимешь одну половину — имена файлов приедут
+`apps/api/src/modules/files/index.ts`; снимешь одну половину — имена файлов приедут
 битыми, и ни типы, ни сборка этого не заметят. То же и с полями ответа: тип
 `MeetingFile` в `apps/web/app/types/files.ts` повторяет схему `fileResponse` на
 api, а зафиксирован контракт в `apps/api/tests/files.e2e.test.ts`.

@@ -1,5 +1,5 @@
 import type { FileKind } from '~/types/files'
-import { NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
+import { apiMessageOf, NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
 import { formatMeetingDate } from '~/utils/meetings'
 
 /**
@@ -59,9 +59,13 @@ export const describeFilesFailure = (error: unknown): string => {
 }
 
 /**
- * Отказ `POST /meetings/:id/files`. Проверка формата и размера до отправки —
- * фаза 5; пока api принимает что угодно, и осмысленных причин отказа ровно две:
- * связи нет и встречи больше нет.
+ * Отказ `POST /meetings/:id/files`. Формат (415), размер (413) и лимит файлов
+ * встречи (409) api объясняет сам, по-русски и для показа как есть — тексты в
+ * `apps/api/src/modules/files/limits.ts`. «Попробуйте ещё раз» на них было бы
+ * враньём: повтор упрётся в тот же отказ.
+ *
+ * Проверка формата и размера до отправки — фаза 5; пока заведомо негодный файл
+ * доезжает до api и получает отказ оттуда.
  */
 export const describeUploadFailure = (error: unknown): string => {
   switch (statusOf(error)) {
@@ -69,6 +73,10 @@ export const describeUploadFailure = (error: unknown): string => {
       return NO_CONNECTION_MESSAGE
     case 404:
       return 'Встреча не найдена — возможно, её удалили.'
+    case 409:
+    case 413:
+    case 415:
+      return apiMessageOf(error) ?? 'Этот файл загрузить нельзя.'
     default:
       return 'Файл не загрузился. Попробуйте ещё раз.'
   }

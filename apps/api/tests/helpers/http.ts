@@ -49,6 +49,14 @@ export interface UploadedFile {
   type?: string
   /** Сырые байты файла: строка, Uint8Array или поток — как их принимает `Request`. */
   body: RequestInit['body']
+  /**
+   * Заявленный размер — `Content-Length`. Сам `Request` его не проставляет даже
+   * для строкового тела, поэтому без этого поля заголовка нет вовсе, как у
+   * chunked-загрузки. Задаётся отдельно от тела: так тест бьёт по лимиту
+   * заявленным размером, не гоняя гигабайты, и так же изображает клиента,
+   * который соврал.
+   */
+  declaredSize?: number
 }
 
 /**
@@ -62,6 +70,7 @@ export const postFile = (path: string, file: UploadedFile, token?: string): Prom
     headers: {
       'x-file-name': encodeURIComponent(file.name),
       ...(file.type === undefined ? {} : { 'content-type': file.type }),
+      ...(file.declaredSize === undefined ? {} : { 'content-length': String(file.declaredSize) }),
       ...authorization(token),
     },
     body: file.body,

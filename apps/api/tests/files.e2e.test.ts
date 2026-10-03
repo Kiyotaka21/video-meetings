@@ -1,10 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
+import { prisma } from '../src/db/prisma'
+import {
+  FORMATS,
+  MAX_DOCUMENT_SIZE,
+  MAX_FILES_PER_MEETING,
+  SIZE_LIMITS,
+} from '../src/modules/files/limits'
 import { getJson, postFile, postJson, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
 import { TEST_UPLOAD_DIR } from './setup'
@@ -68,6 +75,44 @@ const document = (name = 'Отчёт за квартал.pdf') => ({
 
 /** Каталог встречи на диске: путь целиком генерирует api, клиент его не видит. */
 const meetingDir = (meetingId: string): string => join(TEST_UPLOAD_DIR, meetingId)
+
+/**
+ * Что лежит в каталоге встречи. Каталога нет — пустой список: отказ до записи
+ * его не создаёт, отказ посреди записи оставляет пустым, и для теста оба случая
+ * значат одно — на диске после отказа ничего не осталось.
+ */
+const storedFiles = (meetingId: string): string[] =>
+  existsSync(meetingDir(meetingId)) ? readdirSync(meetingDir(meetingId)).sort() : []
+
+/**
+ * Ждёт, пока какой-нибудь запрос в нашей базе встанет в очередь за замком.
+ * Опрашиваем `pg_stat_activity`, а не спим наугад: на медленной машине «100 мс»
+ * не хватит, и тест на гонку молча перестанет её проверять. Тестовые файлы
+ * `bun test` гоняет по очереди, так что чужих ожидающих здесь не бывает.
+ */
+const waitForLockWaiter = async (): Promise<void> => {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    const [row] = await prisma.$queryRaw<Array<{ waiting: number }>>`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND datname = current_database()`
+
+    if ((row?.waiting ?? 0) > 0) {
+      return
+    }
+
+    await Bun.sleep(20)
+  }
+
+  throw new Error('Загрузка так и не встала в очередь за замком на встрече')
+}
+
+const messageOf = (response: ApiResponse): string => {
+  const { message } = response.body as { message: unknown }
+
+  expect(typeof message).toBe('string')
+
+  return message as string
+}
 
 const uploadDocument = async (meetingId: string, token: string, name?: string) =>
   asFile((await postFile(filesPath(meetingId), document(name), token)).body)
@@ -204,7 +249,7 @@ describe('POST /meetings/:id/files', () => {
     expect(asFile(notes.body).kind).toBe('document')
   })
 
-  it('принимает файл без заголовка Content-Type', async () => {
+  it('принимает файл без заголовка Content-Type и пишет тип его формата', async () => {
     const owner = await registerUser()
     const meetingId = await createMeeting(owner.token)
 
@@ -215,7 +260,7 @@ describe('POST /meetings/:id/files', () => {
     )
 
     expect(response.status).toBe(201)
-    expect(asFile(response.body).mimeType).toBe('application/octet-stream')
+    expect(asFile(response.body).mimeType).toBe('text/plain')
   })
 
   it('без заголовка с именем → 400', async () => {
@@ -229,6 +274,7 @@ describe('POST /meetings/:id/files', () => {
     })
 
     expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
   })
 
   it('битое percent-кодирование в имени → 400, а не 500', async () => {
@@ -243,6 +289,7 @@ describe('POST /meetings/:id/files', () => {
     })
 
     expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
   })
 
   it('на чужую встречу не создаёт каталог на диске', async () => {
@@ -254,6 +301,485 @@ describe('POST /meetings/:id/files', () => {
 
     expect(response.status).toBe(404)
     expect(() => readdirSync(meetingDir(meetingId))).toThrow()
+  })
+})
+
+describe('Форматы: 415 на всё, чего нет в таблице', () => {
+  it('.zip → 415 с текстом про формат, а на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'архив встречи.zip', type: 'application/zip', body: 'PK' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    // Текст уходит пользователю как есть — фронтенд показывает его в отказе.
+    expect(messageOf(response)).toBe('Формат .zip не поддерживается')
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('.exe → 415', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'setup.exe', type: 'application/x-msdownload', body: 'MZ' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('файл без расширения → 415', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'README', type: 'text/plain', body: 'без расширения' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('заявленный тип вне списка своего расширения → 415: .pdf как text/html', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Подмена типа: такой файл при отдаче уехал бы HTML'ем с origin'а api.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'отчёт.pdf', type: 'text/html', body: '<script>alert(1)</script>' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(messageOf(response)).toContain('.pdf')
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('расширение сравнивается без учёта регистра: .PDF ложится на диск как .pdf', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'СКАН.PDF', type: 'application/pdf', body: '%PDF' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+
+    const file = asFile(response.body)
+
+    expect(file.name).toBe('СКАН.PDF')
+    expect(storedFiles(meetingId)).toEqual([`${file.id}.pdf`])
+  })
+
+  // Браузер берёт тип из реестра ОС, и на Windows для .m4a и .webm его там
+  // сплошь и рядом нет: приезжает пустая строка или octet-stream. Отбить такой
+  // файл — значит сломать честную загрузку на пустом месте.
+  for (const declared of [undefined, '', 'application/octet-stream']) {
+    it(`тип «${declared ?? 'нет заголовка'}» у .m4a не мешает: в метаданных тип формата`, async () => {
+      const owner = await registerUser()
+      const meetingId = await createMeeting(owner.token)
+
+      const response = await postFile(
+        filesPath(meetingId),
+        { name: 'созвон.m4a', type: declared, body: 'звук' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+      expect(asFile(response.body).mimeType).toBe('audio/mp4')
+      expect(asFile(response.body).kind).toBe('recording')
+    })
+  }
+
+  it('в метаданные уходит тип формата, а не заявленный: .m4a как audio/x-m4a', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'созвон.m4a', type: 'audio/x-m4a; codecs=mp4a.40.2', body: 'звук' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).mimeType).toBe('audio/mp4')
+  })
+
+  it('CSV с типом от Excel на Windows принимается', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Установленный Excel перехватывает .csv в реестре, и браузер шлёт его тип.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'участники.csv', type: 'application/vnd.ms-excel', body: 'email\n' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).mimeType).toBe('text/csv')
+  })
+
+  it('таблица форматов — ровно список из PRD, по группам', () => {
+    const extensionsOf = (kind: string) =>
+      [...FORMATS]
+        .filter(([, format]) => format.kind === kind)
+        .map(([extension]) => extension)
+        .sort()
+
+    expect(extensionsOf('recording')).toEqual(
+      ['.m4a', '.mov', '.mp3', '.mp4', '.ogg', '.wav', '.webm'].sort(),
+    )
+    expect(extensionsOf('document')).toEqual(
+      ['.csv', '.docx', '.md', '.pdf', '.pptx', '.txt', '.xlsx'].sort(),
+    )
+  })
+
+  it('каждый формат из таблицы принимается со своим типом и своей группой', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    for (const [extension, format] of FORMATS) {
+      const response = await postFile(
+        filesPath(meetingId),
+        { name: `файл${extension}`, type: format.mimeType, body: 'байты' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+      expect(asFile(response.body).kind).toBe(format.kind)
+      expect(asFile(response.body).mimeType).toBe(format.mimeType)
+    }
+  })
+})
+
+/**
+ * Тело из `size` нулевых байт чанками по 1 МиБ: в памяти теста держится один
+ * чанк, а не весь файл. Поток, а не строка, — так байты идут через тот же цикл
+ * записи, что и у настоящей загрузки.
+ */
+const zeros = (size: number): ReadableStream<Uint8Array> => {
+  const chunk = new Uint8Array(1024 * 1024)
+  let left = size
+
+  return new ReadableStream({
+    pull(controller) {
+      if (left === 0) {
+        controller.close()
+
+        return
+      }
+
+      const length = Math.min(left, chunk.byteLength)
+
+      controller.enqueue(chunk.subarray(0, length))
+      left -= length
+    },
+  })
+}
+
+describe('Размер: 413 по Content-Length и по факту записанных байт', () => {
+  it('запись с заявленными 2.1 ГБ → 413 до чтения тела, на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Бьём по заголовку, а не гоним гигабайты через `app.handle`: отказ по
+    // `Content-Length` обязан случиться раньше, чем прочитан первый байт.
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'планёрка.mp4',
+        type: 'video/mp4',
+        body: 'кадры',
+        declaredSize: Math.round(2.1 * 1024 ** 3),
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.recording.tooLarge)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('документ с заявленными 51 МБ → 413: у документа свой лимит', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { ...document(), declaredSize: 51 * 1024 ** 2 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.document.tooLarge)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('лимит считается от группы: запись на 51 МБ лимит документа не задевает', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'созвон.mp3', type: 'audio/mpeg', body: 'звук', declaredSize: 51 * 1024 ** 2 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+  })
+
+  it('документ ровно на лимит принимается: граница включительно', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'протокол.pdf',
+        type: 'application/pdf',
+        body: zeros(MAX_DOCUMENT_SIZE),
+        declaredSize: MAX_DOCUMENT_SIZE,
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).size).toBe(MAX_DOCUMENT_SIZE)
+  })
+
+  it('клиент соврал в Content-Length: 413 по счётчику, недописанный файл удалён', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Заголовок обещает 10 байт, тело несёт на байт больше лимита. Проверка
+    // заголовка такого клиента пропускает — ловит только счётчик в потоке.
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'протокол.pdf',
+        type: 'application/pdf',
+        body: zeros(MAX_DOCUMENT_SIZE + 1),
+        declaredSize: 10,
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.document.tooLarge)
+    // Каталог встречи к этому моменту уже создан, но `.part` в нём не осталось.
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
+  })
+
+  it('без Content-Length судит тот же счётчик', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: zeros(MAX_DOCUMENT_SIZE + 1) },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+})
+
+describe(`Число файлов: 409 на ${MAX_FILES_PER_MEETING + 1}-й`, () => {
+  const note = (index: number) => ({
+    name: `заметка ${index}.txt`,
+    type: 'text/plain',
+    body: `заметка ${index}`,
+  })
+
+  /** Заполняет встречу мелкими файлами, по одному: порядок тут не важен, важен счёт. */
+  const fill = async (meetingId: string, token: string, count: number) => {
+    for (let index = 1; index <= count; index += 1) {
+      const response = await postFile(filesPath(meetingId), note(index), token)
+
+      expect(response.status).toBe(201)
+    }
+  }
+
+  it('лишний файл → 409 с текстом про лимит, на диске только принятые', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    await fill(meetingId, owner.token, MAX_FILES_PER_MEETING)
+
+    const response = await postFile(filesPath(meetingId), note(0), owner.token)
+
+    expect(response.status).toBe(409)
+    expect(messageOf(response)).toContain('лимит')
+    expect(messageOf(response)).toContain(String(MAX_FILES_PER_MEETING))
+
+    const listed = asFiles((await getJson(filesPath(meetingId), owner.token)).body)
+
+    expect(listed).toHaveLength(MAX_FILES_PER_MEETING)
+    // Ровно принятые файлы и ни одного `.part`: отказ не оставил следа на диске.
+    expect(storedFiles(meetingId)).toEqual(listed.map((file) => `${file.id}.txt`).sort())
+  })
+
+  it('лимит считается на встречу: у соседней встречи того же владельца место есть', async () => {
+    const owner = await registerUser()
+    const fullMeetingId = await createMeeting(owner.token)
+    const otherMeetingId = await createMeeting(owner.token)
+
+    await fill(fullMeetingId, owner.token, MAX_FILES_PER_MEETING)
+
+    const response = await postFile(filesPath(otherMeetingId), note(0), owner.token)
+
+    expect(response.status).toBe(201)
+  })
+
+  /**
+   * Гонка на последнее место, разыгранная детерминированно. «Пять загрузок
+   * через `Promise.all`» её не ловит — проверено: через `app.handle` запросы
+   * доходят до вставки вразнобой, окно не открывается, и такой тест зелёный и
+   * без замка.
+   *
+   * Поэтому соседний запрос изображает сам тест: держит открытую транзакцию с
+   * замком на встрече и уже вставленным двадцатым файлом, дожидается, пока
+   * загрузка встанет в очередь за замком, и только тогда коммитит. С замком в
+   * обработчике загрузка считает файлы после коммита и видит 20 — 409. Без него
+   * она насчитала 19 ещё до коммита, а потом вставляет двадцать первый — 201.
+   */
+  it('загрузка, ждущая соседа на последнее место, получает 409, а не 21-й файл', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    await fill(meetingId, owner.token, MAX_FILES_PER_MEETING - 1)
+
+    const { promise: lockTaken, resolve: takeLock } = Promise.withResolvers<void>()
+    const { promise: released, resolve: release } = Promise.withResolvers<void>()
+
+    const neighbour = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM meetings WHERE id = ${meetingId} FOR UPDATE`
+      await tx.meetingFile.create({
+        data: {
+          name: 'сосед.txt',
+          size: 1n,
+          mimeType: 'text/plain',
+          kind: 'document',
+          path: `${meetingId}/сосед.txt`,
+          meetingId,
+        },
+      })
+      takeLock()
+      await released
+    })
+
+    await lockTaken
+
+    const upload = postFile(filesPath(meetingId), note(0), owner.token)
+
+    await waitForLockWaiter()
+    release()
+    await neighbour
+
+    const response = await upload
+
+    expect(response.status).toBe(409)
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toHaveLength(
+      MAX_FILES_PER_MEETING,
+    )
+    // Принятые 19 и ни одного `.part`: у «соседа» файла на диске нет вовсе.
+    expect(storedFiles(meetingId)).toHaveLength(MAX_FILES_PER_MEETING - 1)
+  })
+})
+
+describe('Имя файла не участвует в пути на диске', () => {
+  // Голое `../../etc/passwd` расширения не имеет — `extname` даёт пустую строку,
+  // — и отбивается форматом раньше, чем дело доходит до пути. Проверять, куда
+  // ляжет файл, приходится на имени с разрешённым расширением.
+  it('`../../etc/passwd` без расширения → 415, на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: '../../etc/passwd', body: 'root:x:0:0' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(existsSync(resolve(meetingDir(meetingId), '../../etc'))).toBe(false)
+  })
+
+  for (const name of ['../../etc/passwd.txt', '..\\..\\etc\\passwd.txt']) {
+    it(`«${name}» ложится внутрь каталога встречи, а в списке — исходным именем`, async () => {
+      const owner = await registerUser()
+      const meetingId = await createMeeting(owner.token)
+
+      const response = await postFile(
+        filesPath(meetingId),
+        { name, type: 'text/plain', body: 'root:x:0:0' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+
+      const file = asFile(response.body)
+
+      // Путь — `<id встречи>/<id файла><расширение из таблицы>`: из имени в него
+      // не доезжает ни один символ, поэтому и `../`, и `..\` тут бессильны.
+      expect(storedFiles(meetingId)).toEqual([`${file.id}.txt`])
+      expect(existsSync(resolve(meetingDir(meetingId), '../../etc'))).toBe(false)
+      expect(existsSync(resolve(meetingDir(meetingId), '..\\..\\etc'))).toBe(false)
+
+      const listed = asFiles((await getJson(filesPath(meetingId), owner.token)).body)
+
+      expect(listed.map((item) => item.name)).toEqual([name])
+    })
+  }
+})
+
+describe('Обрыв посреди тела', () => {
+  it('недописанный файл удаляется, строки в базе нет', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Так через `app.handle` выглядит клиент, который нажал «Отменить» или
+    // потерял сеть: на живом сервере цикл чтения бросает `AbortError`.
+    let sent = false
+    const broken = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) {
+          controller.error(new Error('Соединение оборвалось'))
+
+          return
+        }
+
+        sent = true
+        controller.enqueue(new Uint8Array(64 * 1024))
+      },
+    })
+
+    await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: broken },
+      owner.token,
+    )
+
+    // Код ответа на оборванный запрос никто не прочитает — важно, что на
+    // диске и в базе от него ничего не осталось.
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
   })
 })
 
