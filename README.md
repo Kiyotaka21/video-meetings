@@ -126,11 +126,12 @@ pre-commit-хук husky запускает: перед каждым коммит
 Проект разрабатывается от тестов: сначала контракт в виде падающего теста, потом
 реализация. Тесты в `apps/api/tests/` — исполняемая спецификация API:
 
-| Файл                   | Что фиксирует                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `auth.e2e.test.ts`     | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT               |
-| `meetings.e2e.test.ts` | встречи: guard по токену, изоляция между пользователями, формат дат                              |
-| `files.e2e.test.ts`    | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
+| Файл                       | Что фиксирует                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT               |
+| `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат                              |
+| `files.e2e.test.ts`        | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
+| `file-content.e2e.test.ts` | отдача по ссылке: `Range` побайтово, `Content-Disposition`, кто открывает файл (401/404)         |
 
 Тесты не чистят за собой базу, а генерируют уникальные адреса, так что `users` и
 `meetings` после прогонов заполняются мусором. Вычистить: `docker compose down -v`
@@ -219,8 +220,9 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
   Классы сортирует `prettier-plugin-tailwindcss`.
 - **Elysia-плагины** — `@elysiajs/cors` (origin'ы из `CORS_ORIGINS`, `credentials: true`),
   `@elysiajs/openapi` (Scalar UI на `/docs`, спека на `/docs/json`; выключен при
-  `NODE_ENV=production`) и `@elysiajs/jwt` (подпись HS256 секретом `JWT_SECRET`,
-  срок жизни из `JWT_EXPIRES_IN`).
+  `NODE_ENV=production`) и `@elysiajs/jwt` — два инстанса: сессионный (HS256 секретом `JWT_SECRET`, срок
+  из `JWT_EXPIRES_IN`) и файловые ссылки (секрет выведен из `JWT_SECRET`, срок из
+  `FILE_LINK_EXPIRES_IN`).
 - **Prisma 7** — ORM для Postgres. У семёрки нет Rust-движка, поэтому клиент ходит в
   базу через драйверный адаптер `@prisma/adapter-pg`, а `DATABASE_URL` задаётся в
   `apps/api/prisma.config.ts`, а не в блоке `datasource`. CLI запускается как
@@ -306,11 +308,20 @@ curl -X POST http://localhost:3000/meetings/<id>/files \
   -H "authorization: Bearer $TOKEN" \
   -H 'x-file-name: notes.md' -H 'content-type: text/markdown' \
   --data-binary @notes.md
-# 201 {"id":"...","name":"notes.md","size":1234,"mimeType":"text/markdown","kind":"document","status":"uploaded","createdAt":"..."}
+# 201 {"id":"...","name":"notes.md","size":1234,"mimeType":"text/markdown","kind":"document","status":"uploaded","createdAt":"...","url":"/meetings/<id>/files/<fileId>/content?token=..."}
 
 curl http://localhost:3000/meetings/<id>/files -H "authorization: Bearer $TOKEN"
 # 200 [...] — файлы этой встречи по дате загрузки
+
+curl "http://localhost:3000<url из списка>" -H 'range: bytes=0-99'
+# 206 и ровно 100 байт; без Range — 200 и файл целиком
 ```
+
+Поле `url` — путь отдачи от корня api с коротким файловым токеном в `?token=`:
+`<video>` и ссылка на скачивание не умеют слать `Authorization`. Токен открывает
+ровно один файл и живёт `FILE_LINK_EXPIRES_IN` (15 минут); сессионный токен
+вместо него не годится, и наоборот. Отдача поддерживает `Range` для перемотки и
+отдаёт исходное имя в `Content-Disposition`.
 
 Имя в заголовке обязано быть percent-encoded (`encodeURIComponent`): значение
 HTTP-заголовка — байты Latin-1, и кириллическое имя в него не помещается вовсе.
@@ -326,5 +337,5 @@ HTTP-заголовка — байты Latin-1, и кириллическое и
 | `413` | запись больше 2 ГБ (`mp4 webm mov mp3 m4a wav ogg`) или документ больше 50 МБ (`pdf docx pptx xlsx txt md csv`) |
 | `409` | во встрече уже 20 файлов                                                                                        |
 
-Текст отказа в `message` — по-русски, для показа пользователю как есть. Отдача
-файла и удаление — следующие фазы, см. `docs/plan-meeting-file-upload.md`.
+Текст отказа в `message` — по-русски, для показа пользователю как есть. Удаление
+файла — следующая фаза, см. `docs/plan-meeting-file-upload.md`.

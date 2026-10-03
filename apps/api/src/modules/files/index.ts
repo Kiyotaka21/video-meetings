@@ -1,13 +1,13 @@
 import { mkdir, rename, unlink } from 'node:fs/promises'
-import { extname, isAbsolute, join, relative } from 'node:path'
+import { extname } from 'node:path'
 
 import { Elysia, t } from 'elysia'
 
 import type { Prisma } from '../../../generated/prisma/client'
 import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
-import { env } from '../../config/env'
 import { prisma } from '../../db/prisma'
 import { authenticated } from '../auth'
+import { fileContentRoutes } from './content'
 import {
   acceptsDeclaredType,
   type FileFormat,
@@ -16,6 +16,8 @@ import {
   SIZE_LIMITS,
   TOO_MANY_FILES,
 } from './limits'
+import { contentPath, fileLinkJwt } from './link'
+import { meetingDirectory, storedPath, writeBody } from './storage'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск
@@ -39,6 +41,12 @@ const fileResponse = t.Object({
     t.Literal('failed'),
   ]),
   createdAt: t.String(),
+  /**
+   * Путь отдачи от корня api с файловым токеном в `?token=`. Не абсолютный
+   * адрес: api не знает, под каким origin'ом его видит браузер, — фронтенд
+   * склеивает путь со своим адресом api, как `$fetch` с `baseURL`.
+   */
+  url: t.String(),
 })
 
 const messageResponse = t.Object({ message: t.String() })
@@ -67,13 +75,23 @@ interface MeetingFileRow {
   createdAt: Date
 }
 
-const toResponse = (file: MeetingFileRow) => ({
+/** `sign` файлового JWT-плагина: в контексте он появляется после `.use(fileLinkJwt)`. */
+type SignLink = (payload: { sub: string }) => Promise<string>
+
+/**
+ * Ссылка выписывается в момент ответа и живёт `FILE_LINK_EXPIRES_IN`: страница,
+ * открытая дольше, получит отказ плеера и перезапросит список.
+ */
+const toResponse = async (file: MeetingFileRow, meetingId: string, signLink: SignLink) => ({
   ...file,
   // BigInt не сериализуется в JSON: без Number ответ падает пятисоткой
   // «JSON.stringify cannot serialize BigInt». В базе тип остаётся BigInt —
   // максимум Int в Postgres на байт меньше двух гигабайт.
   size: Number(file.size),
   createdAt: file.createdAt.toISOString(),
+  url: `${contentPath(meetingId, file.id)}?${new URLSearchParams({
+    token: await signLink({ sub: file.id }),
+  })}`,
 })
 
 const MAX_NAME_LENGTH = 255
@@ -151,79 +169,6 @@ const checkFormat = (name: string, contentType: string | undefined): FormatCheck
   return { ok: true, extension, format }
 }
 
-/** 1 МиБ: столько же, сколько в замере памяти из ресерча. */
-const HIGH_WATER_MARK = 1024 * 1024
-
-/**
- * Пишет тело запроса в `.part` и возвращает число записанных байт — или `null`,
- * если тело вышло за `maxSize`. Тогда `.part` уже удалён.
- *
- * Файл публикуется переименованием уже после вставки строки в базу, поэтому
- * недописанного файла читатель не видит никогда: пока он пишется, его имени нет
- * ни в одной строке.
- */
-const writeBody = async (
-  body: ReadableStream<Uint8Array> | null,
-  partPath: string,
-  maxSize: number,
-): Promise<number | null> => {
-  const writer = Bun.file(partPath).writer({ highWaterMark: HIGH_WATER_MARK })
-  let size = 0
-  let tooLarge = false
-
-  try {
-    if (body) {
-      for await (const chunk of body) {
-        size += chunk.byteLength
-
-        // Счётчик обязателен и при проверенном `Content-Length`: заголовок
-        // присылает клиент, и он может соврать или не прислать его вовсе.
-        // Лишний чанк на диск не уходит, а выход из цикла отменяет поток —
-        // остаток тела не читается.
-        if (size > maxSize) {
-          tooLarge = true
-          break
-        }
-
-        // `await` обязателен, и это не стилистика: `write` возвращает промис,
-        // когда запись отложена, и без ожидания цикл читает сокет быстрее, чем
-        // пишет диск. Замер на файле 1 ГБ: +6 МБ RSS с `await` против +2423 МБ
-        // без него. Ни типы, ни тесты на мелких файлах разницы не увидят.
-        await writer.write(chunk)
-      }
-    }
-
-    await writer.end()
-  } catch (error) {
-    // Клиент нажал «Отменить» или потерял сеть: цикл бросает AbortError.
-    // Недописанный `.part` — наш мусор, убрать его больше некому.
-    await writer.end()
-    await unlink(partPath).catch(() => {})
-
-    throw error
-  }
-
-  if (tooLarge) {
-    await unlink(partPath).catch(() => {})
-
-    return null
-  }
-
-  return size
-}
-
-/**
- * Путь собирается из проверенного id встречи, сгенерированного id файла и
- * ключа таблицы форматов, так что `../` из имени сюда не доедет по построению.
- * Проверка всё равно стоит: она переживёт правку, которая решит подставить в
- * путь что-нибудь пользовательское.
- */
-const isInsideUploadDir = (target: string): boolean => {
-  const inside = relative(env.uploadDir, target)
-
-  return inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside)
-}
-
 /**
  * Вставляет строку файла, если во встрече есть место, — иначе `null`.
  *
@@ -248,11 +193,17 @@ const createWithinLimit = (data: Prisma.MeetingFileUncheckedCreateInput) =>
 
 const security = [{ bearerAuth: [] }]
 
-export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
+/**
+ * Маршруты владельца — под `authenticated`. Отдача файла (`content.ts`) живёт в
+ * своём инстансе рядом, а не дописана сюда: guard действует на всё, что внутри
+ * инстанса, а ссылке для `<video>` прислать `Authorization` нечем.
+ */
+const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags: ['Files'] })
   .use(authenticated)
+  .use(fileLinkJwt)
   .post(
     '/:id/files',
-    async ({ params, request, headers, userId, status }) => {
+    async ({ params, request, headers, userId, fileJwt, status }) => {
       // Владелец в `where`, а не проверка после выборки: чужая встреча не
       // находится вовсе и отвечает тем же 404, что и несуществующая.
       const meeting = await prisma.meeting.findFirst({
@@ -300,12 +251,11 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
       }
 
       const id = Bun.randomUUIDv7()
-      const directory = join(env.uploadDir, meeting.id)
-      const destination = join(directory, `${id}${extension}`)
-
-      if (!isInsideUploadDir(destination)) {
-        throw new Error(`Путь файла вышел за пределы UPLOAD_DIR: ${destination}`)
-      }
+      // Путь относительный и всегда со слэшем: переезд каталога загрузок на
+      // другую машину не должен переписывать все строки разом.
+      const relativePath = `${meeting.id}/${id}${extension}`
+      const directory = meetingDirectory(meeting.id)
+      const destination = storedPath(relativePath)
 
       // FileSink родительский каталог не создаёт — без mkdir первая же запись
       // во встречу падает с ENOENT.
@@ -326,9 +276,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
           // Тип формата, а не заявленный: заявленный только проверен выше.
           mimeType: format.mimeType,
           kind: format.kind,
-          // Путь относительный и всегда со слэшем: переезд каталога загрузок
-          // на другую машину не должен переписывать все строки разом.
-          path: `${meeting.id}/${id}${extension}`,
+          path: relativePath,
           meetingId: meeting.id,
         })
 
@@ -340,7 +288,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
 
         await rename(partPath, destination)
 
-        return status(201, toResponse(file))
+        return status(201, await toResponse(file, meeting.id, (payload) => fileJwt.sign(payload)))
       } catch (error) {
         await unlink(partPath).catch(() => {})
 
@@ -366,7 +314,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
   )
   .get(
     '/:id/files',
-    async ({ params, userId, status }) => {
+    async ({ params, userId, fileJwt, status }) => {
       const meeting = await prisma.meeting.findFirst({
         where: { id: params.id, ownerId: userId },
         select: { id: true },
@@ -385,7 +333,9 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         select: publicFields,
       })
 
-      return files.map(toResponse)
+      return Promise.all(
+        files.map((file) => toResponse(file, meeting.id, (payload) => fileJwt.sign(payload))),
+      )
     },
     {
       params: t.Object({ id: t.String() }),
@@ -397,3 +347,5 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
       detail: { summary: 'List files of a meeting', security },
     },
   )
+
+export const filesModule = new Elysia().use(ownerRoutes).use(fileContentRoutes)

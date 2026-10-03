@@ -22,8 +22,16 @@ export interface MeetingFile {
   name: string
   /** Байты числом: api конвертирует `BigInt` на границе ответа. */
   size: number
+  /** Канонический тип формата, а не заявленный при загрузке: его выбирает api. */
   mimeType: string
   kind: FileKind
   status: FileStatus
   createdAt: string
+  /**
+   * Путь отдачи от корня api с файловым токеном в `?token=` — для `<video src>`
+   * и ссылки на скачивание, которые не умеют слать `Authorization`. Склеивается
+   * с `apiUrl` так же, как `$fetch` склеивает `baseURL`. Токен живёт 15 минут:
+   * протухшую ссылку лечит перезапрос списка.
+   */
+  url: string
 }
