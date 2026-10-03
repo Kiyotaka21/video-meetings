@@ -3,11 +3,19 @@ import { extname, isAbsolute, join, relative } from 'node:path'
 
 import { Elysia, t } from 'elysia'
 
+import type { Prisma } from '../../../generated/prisma/client'
 import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
 import { env } from '../../config/env'
 import { prisma } from '../../db/prisma'
 import { authenticated } from '../auth'
-import { acceptsDeclaredType, type FileFormat, FORMATS, SIZE_LIMITS } from './limits'
+import {
+  acceptsDeclaredType,
+  type FileFormat,
+  FORMATS,
+  MAX_FILES_PER_MEETING,
+  SIZE_LIMITS,
+  TOO_MANY_FILES,
+} from './limits'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск
@@ -216,6 +224,28 @@ const isInsideUploadDir = (target: string): boolean => {
   return inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside)
 }
 
+/**
+ * Вставляет строку файла, если во встрече есть место, — иначе `null`.
+ *
+ * Одной транзакции мало (ресерч, 2.6): в Postgres по умолчанию READ COMMITTED, и
+ * `count` внутри неё ничего не блокирует — два параллельных запроса оба насчитают
+ * 19 и оба вставят двадцатый. Замок на строке встречи сериализует их: второй
+ * ждёт на `FOR UPDATE`, пока первый не закоммитит вставку, и уже видит её в
+ * своём счёте. Тест на гонку без замка краснеет — проверено.
+ */
+const createWithinLimit = (data: Prisma.MeetingFileUncheckedCreateInput) =>
+  prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM meetings WHERE id = ${data.meetingId} FOR UPDATE`
+
+    const count = await tx.meetingFile.count({ where: { meetingId: data.meetingId } })
+
+    if (count >= MAX_FILES_PER_MEETING) {
+      return null
+    }
+
+    return tx.meetingFile.create({ data, select: publicFields })
+  })
+
 const security = [{ bearerAuth: [] }]
 
 export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
@@ -260,6 +290,15 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         return status(413, { message: tooLarge })
       }
 
+      // Дешёвая отсечка до записи: без неё лишний файл на 2 ГБ сначала лёг бы
+      // на диск целиком и только потом получил отказ. Окончательно решает счёт
+      // при вставке — до неё место может занять соседний запрос.
+      const filesSoFar = await prisma.meetingFile.count({ where: { meetingId: meeting.id } })
+
+      if (filesSoFar >= MAX_FILES_PER_MEETING) {
+        return status(409, { message: TOO_MANY_FILES })
+      }
+
       const id = Bun.randomUUIDv7()
       const directory = join(env.uploadDir, meeting.id)
       const destination = join(directory, `${id}${extension}`)
@@ -280,21 +319,24 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
       }
 
       try {
-        const file = await prisma.meetingFile.create({
-          data: {
-            id,
-            name,
-            size: BigInt(size),
-            // Тип формата, а не заявленный: заявленный только проверен выше.
-            mimeType: format.mimeType,
-            kind: format.kind,
-            // Путь относительный и всегда со слэшем: переезд каталога загрузок
-            // на другую машину не должен переписывать все строки разом.
-            path: `${meeting.id}/${id}${extension}`,
-            meetingId: meeting.id,
-          },
-          select: publicFields,
+        const file = await createWithinLimit({
+          id,
+          name,
+          size: BigInt(size),
+          // Тип формата, а не заявленный: заявленный только проверен выше.
+          mimeType: format.mimeType,
+          kind: format.kind,
+          // Путь относительный и всегда со слэшем: переезд каталога загрузок
+          // на другую машину не должен переписывать все строки разом.
+          path: `${meeting.id}/${id}${extension}`,
+          meetingId: meeting.id,
         })
+
+        if (!file) {
+          await unlink(partPath).catch(() => {})
+
+          return status(409, { message: TOO_MANY_FILES })
+        }
 
         await rename(partPath, destination)
 
@@ -315,6 +357,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         400: messageResponse,
         401: messageResponse,
         404: messageResponse,
+        409: messageResponse,
         413: messageResponse,
         415: messageResponse,
       },

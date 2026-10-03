@@ -28,6 +28,10 @@ export const SIZE_LIMITS: Readonly<Record<FileKind, { maxSize: number; tooLarge:
   document: { maxSize: MAX_DOCUMENT_SIZE, tooLarge: 'Документ больше 50 МБ' },
 }
 
+export const MAX_FILES_PER_MEETING = 20
+
+export const TOO_MANY_FILES = `Достигнут лимит: во встрече уже ${MAX_FILES_PER_MEETING} файлов, больше загрузить нельзя`
+
 export interface FileFormat {
   kind: FileKind
   /**

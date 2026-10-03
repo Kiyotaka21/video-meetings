@@ -5,7 +5,13 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
-import { FORMATS, MAX_DOCUMENT_SIZE, SIZE_LIMITS } from '../src/modules/files/limits'
+import { prisma } from '../src/db/prisma'
+import {
+  FORMATS,
+  MAX_DOCUMENT_SIZE,
+  MAX_FILES_PER_MEETING,
+  SIZE_LIMITS,
+} from '../src/modules/files/limits'
 import { getJson, postFile, postJson, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
 import { TEST_UPLOAD_DIR } from './setup'
@@ -77,6 +83,28 @@ const meetingDir = (meetingId: string): string => join(TEST_UPLOAD_DIR, meetingI
  */
 const storedFiles = (meetingId: string): string[] =>
   existsSync(meetingDir(meetingId)) ? readdirSync(meetingDir(meetingId)).sort() : []
+
+/**
+ * Ждёт, пока какой-нибудь запрос в нашей базе встанет в очередь за замком.
+ * Опрашиваем `pg_stat_activity`, а не спим наугад: на медленной машине «100 мс»
+ * не хватит, и тест на гонку молча перестанет её проверять. Тестовые файлы
+ * `bun test` гоняет по очереди, так что чужих ожидающих здесь не бывает.
+ */
+const waitForLockWaiter = async (): Promise<void> => {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    const [row] = await prisma.$queryRaw<Array<{ waiting: number }>>`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND datname = current_database()`
+
+    if ((row?.waiting ?? 0) > 0) {
+      return
+    }
+
+    await Bun.sleep(20)
+  }
+
+  throw new Error('Загрузка так и не встала в очередь за замком на встрече')
+}
 
 const messageOf = (response: ApiResponse): string => {
   const { message } = response.body as { message: unknown }
@@ -566,6 +594,109 @@ describe('Размер: 413 по Content-Length и по факту записа�
 
     expect(response.status).toBe(413)
     expect(storedFiles(meetingId)).toEqual([])
+  })
+})
+
+describe(`Число файлов: 409 на ${MAX_FILES_PER_MEETING + 1}-й`, () => {
+  const note = (index: number) => ({
+    name: `заметка ${index}.txt`,
+    type: 'text/plain',
+    body: `заметка ${index}`,
+  })
+
+  /** Заполняет встречу мелкими файлами, по одному: порядок тут не важен, важен счёт. */
+  const fill = async (meetingId: string, token: string, count: number) => {
+    for (let index = 1; index <= count; index += 1) {
+      const response = await postFile(filesPath(meetingId), note(index), token)
+
+      expect(response.status).toBe(201)
+    }
+  }
+
+  it('лишний файл → 409 с текстом про лимит, на диске только принятые', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    await fill(meetingId, owner.token, MAX_FILES_PER_MEETING)
+
+    const response = await postFile(filesPath(meetingId), note(0), owner.token)
+
+    expect(response.status).toBe(409)
+    expect(messageOf(response)).toContain('лимит')
+    expect(messageOf(response)).toContain(String(MAX_FILES_PER_MEETING))
+
+    const listed = asFiles((await getJson(filesPath(meetingId), owner.token)).body)
+
+    expect(listed).toHaveLength(MAX_FILES_PER_MEETING)
+    // Ровно принятые файлы и ни одного `.part`: отказ не оставил следа на диске.
+    expect(storedFiles(meetingId)).toEqual(listed.map((file) => `${file.id}.txt`).sort())
+  })
+
+  it('лимит считается на встречу: у соседней встречи того же владельца место есть', async () => {
+    const owner = await registerUser()
+    const fullMeetingId = await createMeeting(owner.token)
+    const otherMeetingId = await createMeeting(owner.token)
+
+    await fill(fullMeetingId, owner.token, MAX_FILES_PER_MEETING)
+
+    const response = await postFile(filesPath(otherMeetingId), note(0), owner.token)
+
+    expect(response.status).toBe(201)
+  })
+
+  /**
+   * Гонка на последнее место, разыгранная детерминированно. «Пять загрузок
+   * через `Promise.all`» её не ловит — проверено: через `app.handle` запросы
+   * доходят до вставки вразнобой, окно не открывается, и такой тест зелёный и
+   * без замка.
+   *
+   * Поэтому соседний запрос изображает сам тест: держит открытую транзакцию с
+   * замком на встрече и уже вставленным двадцатым файлом, дожидается, пока
+   * загрузка встанет в очередь за замком, и только тогда коммитит. С замком в
+   * обработчике загрузка считает файлы после коммита и видит 20 — 409. Без него
+   * она насчитала 19 ещё до коммита, а потом вставляет двадцать первый — 201.
+   */
+  it('загрузка, ждущая соседа на последнее место, получает 409, а не 21-й файл', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    await fill(meetingId, owner.token, MAX_FILES_PER_MEETING - 1)
+
+    const { promise: lockTaken, resolve: takeLock } = Promise.withResolvers<void>()
+    const { promise: released, resolve: release } = Promise.withResolvers<void>()
+
+    const neighbour = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM meetings WHERE id = ${meetingId} FOR UPDATE`
+      await tx.meetingFile.create({
+        data: {
+          name: 'сосед.txt',
+          size: 1n,
+          mimeType: 'text/plain',
+          kind: 'document',
+          path: `${meetingId}/сосед.txt`,
+          meetingId,
+        },
+      })
+      takeLock()
+      await released
+    })
+
+    await lockTaken
+
+    const upload = postFile(filesPath(meetingId), note(0), owner.token)
+
+    await waitForLockWaiter()
+    release()
+    await neighbour
+
+    const response = await upload
+
+    expect(response.status).toBe(409)
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toHaveLength(
+      MAX_FILES_PER_MEETING,
+    )
+    // Принятые 19 и ни одного `.part`: у «соседа» файла на диске нет вовсе.
+    expect(storedFiles(meetingId)).toHaveLength(MAX_FILES_PER_MEETING - 1)
   })
 })
 
