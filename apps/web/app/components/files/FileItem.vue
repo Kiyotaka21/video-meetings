@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import type { MeetingFile } from '~/types/files'
-import { FILE_KIND_ICONS, FILE_KIND_LABELS, formatFileSize, formatUploadedAt } from '~/utils/files'
+import {
+  FILE_MEDIA_ICONS,
+  FILE_MEDIA_LABELS,
+  formatFileSize,
+  formatUploadedAt,
+  mediaOf,
+} from '~/utils/files'
 
 interface Props {
   file: MeetingFile
@@ -8,8 +14,9 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const icon = computed(() => FILE_KIND_ICONS[props.file.kind])
-const kindLabel = computed(() => FILE_KIND_LABELS[props.file.kind])
+const media = computed(() => mediaOf(props.file))
+const icon = computed(() => FILE_MEDIA_ICONS[media.value])
+const kindLabel = computed(() => FILE_MEDIA_LABELS[media.value])
 </script>
 
 <template>

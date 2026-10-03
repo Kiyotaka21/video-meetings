@@ -2,7 +2,7 @@
 import type { MeetingFile } from '~/types/files'
 import type { Meeting } from '~/types/meetings'
 import { isUnauthorized, statusOf } from '~/utils/api'
-import { describeFilesFailure, describeUploadFailure } from '~/utils/files'
+import { checkFileBeforeUpload, describeFilesFailure, describeUploadFailure } from '~/utils/files'
 import { describeMeetingFailure } from '~/utils/meetings'
 
 // routeRules '/meetings/**' -> ssr: false: страница за авторизацией, токен
@@ -13,14 +13,14 @@ const route = useRoute()
 const toast = useToast()
 const { logout } = useAuth()
 const { fetchMeeting } = useMeetings()
-const { fetchFiles, uploadFile } = useMeetingFiles()
+const { fetchFiles } = useMeetingFiles()
+const { upload, start: startUpload, cancel: cancelUpload } = useActiveUpload()
 
 const meetingId = computed(() => String(route.params.id))
 
 const meeting = shallowRef<Meeting | null>(null)
 const files = shallowRef<MeetingFile[]>([])
 const isLoading = shallowRef(true)
-const isUploading = shallowRef(false)
 /** Встреча чужая или её нет — api отвечает одинаково, и это не ошибка загрузки. */
 const isMissing = shallowRef(false)
 const failure = shallowRef<string | null>(null)
@@ -96,11 +96,42 @@ const load = async () => {
 
 onMounted(load)
 
-const onUpload = async (file: File) => {
-  isUploading.value = true
+const refuseUpload = (description: string) =>
+  toast.add({
+    title: 'Файл не загрузился',
+    description,
+    color: 'error',
+    icon: 'i-lucide-triangle-alert',
+  })
+
+const onSelect = async (file: File, ignored: number) => {
+  // Проверка до отправки: на отказе на api не уходит ни одного запроса.
+  const refusal = checkFileBeforeUpload(file, files.value.length)
+
+  if (refusal) {
+    refuseUpload(refusal)
+
+    return
+  }
+
+  // Бросили несколько разом — берём первый и говорим об этом, а не молчим:
+  // иначе пользователь ждал бы, что уедут все.
+  if (ignored > 0) {
+    toast.add({
+      title: 'Загружаем по одному файлу',
+      description: `Взяли «${file.name}». Остальные (${ignored}) перетащите после него.`,
+      color: 'info',
+      icon: 'i-lucide-info',
+    })
+  }
 
   try {
-    const uploaded = await uploadFile(meetingId.value, file)
+    const uploaded = await startUpload(meetingId.value, file)
+
+    // Отменил сам — строка загрузки уже пропала, сообщать нечего.
+    if (!uploaded) {
+      return
+    }
 
     // Список не перезапрашиваем: api вернул метаданные ровно этого файла, а
     // сортировка по дате загрузки ставит его в конец — туда же, куда и мы.
@@ -119,14 +150,7 @@ const onUpload = async (file: File) => {
       return
     }
 
-    toast.add({
-      title: 'Файл не загрузился',
-      description: describeUploadFailure(error),
-      color: 'error',
-      icon: 'i-lucide-triangle-alert',
-    })
-  } finally {
-    isUploading.value = false
+    refuseUpload(describeUploadFailure(error))
   }
 }
 </script>
@@ -175,8 +199,9 @@ const onUpload = async (file: File) => {
           :files="files"
           :pending="isLoading"
           :failure="filesFailure"
-          :uploading="isUploading"
-          @upload="onUpload"
+          :upload="upload"
+          @select="onSelect"
+          @cancel="cancelUpload"
           @retry="load"
         />
       </template>
