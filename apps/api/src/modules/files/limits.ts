@@ -10,6 +10,24 @@ import type { FileKind } from '../../../generated/prisma/enums'
  * ни сборка.
  */
 
+/**
+ * 2 ГиБ — столько файловый менеджер и наш интерфейс показывают как «2 ГБ».
+ * Потолок тела у Bun.serve (`MAX_REQUEST_BODY_SIZE` в `env.ts`) держится выше:
+ * сверх него Bun молча рвёт сокет, и наш 413 с текстом не успел бы ответить.
+ */
+export const MAX_RECORDING_SIZE = 2 * 1024 ** 3
+
+export const MAX_DOCUMENT_SIZE = 50 * 1024 ** 2
+
+/**
+ * Лимит размера по группе и текст отказа рядом с ним: поправишь число — текст
+ * перед глазами. Тексты по-русски и уходят пользователю как есть.
+ */
+export const SIZE_LIMITS: Readonly<Record<FileKind, { maxSize: number; tooLarge: string }>> = {
+  recording: { maxSize: MAX_RECORDING_SIZE, tooLarge: 'Файл больше 2 ГБ' },
+  document: { maxSize: MAX_DOCUMENT_SIZE, tooLarge: 'Документ больше 50 МБ' },
+}
+
 export interface FileFormat {
   kind: FileKind
   /**

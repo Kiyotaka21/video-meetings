@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
-import { FORMATS } from '../src/modules/files/limits'
+import { FORMATS, MAX_DOCUMENT_SIZE, SIZE_LIMITS } from '../src/modules/files/limits'
 import { getJson, postFile, postJson, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
 import { TEST_UPLOAD_DIR } from './setup'
@@ -432,6 +432,140 @@ describe('Форматы: 415 на всё, чего нет в таблице', (
       expect(asFile(response.body).kind).toBe(format.kind)
       expect(asFile(response.body).mimeType).toBe(format.mimeType)
     }
+  })
+})
+
+/**
+ * Тело из `size` нулевых байт чанками по 1 МиБ: в памяти теста держится один
+ * чанк, а не весь файл. Поток, а не строка, — так байты идут через тот же цикл
+ * записи, что и у настоящей загрузки.
+ */
+const zeros = (size: number): ReadableStream<Uint8Array> => {
+  const chunk = new Uint8Array(1024 * 1024)
+  let left = size
+
+  return new ReadableStream({
+    pull(controller) {
+      if (left === 0) {
+        controller.close()
+
+        return
+      }
+
+      const length = Math.min(left, chunk.byteLength)
+
+      controller.enqueue(chunk.subarray(0, length))
+      left -= length
+    },
+  })
+}
+
+describe('Размер: 413 по Content-Length и по факту записанных байт', () => {
+  it('запись с заявленными 2.1 ГБ → 413 до чтения тела, на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Бьём по заголовку, а не гоним гигабайты через `app.handle`: отказ по
+    // `Content-Length` обязан случиться раньше, чем прочитан первый байт.
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'планёрка.mp4',
+        type: 'video/mp4',
+        body: 'кадры',
+        declaredSize: Math.round(2.1 * 1024 ** 3),
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.recording.tooLarge)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('документ с заявленными 51 МБ → 413: у документа свой лимит', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { ...document(), declaredSize: 51 * 1024 ** 2 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.document.tooLarge)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('лимит считается от группы: запись на 51 МБ лимит документа не задевает', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'созвон.mp3', type: 'audio/mpeg', body: 'звук', declaredSize: 51 * 1024 ** 2 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+  })
+
+  it('документ ровно на лимит принимается: граница включительно', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'протокол.pdf',
+        type: 'application/pdf',
+        body: zeros(MAX_DOCUMENT_SIZE),
+        declaredSize: MAX_DOCUMENT_SIZE,
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).size).toBe(MAX_DOCUMENT_SIZE)
+  })
+
+  it('клиент соврал в Content-Length: 413 по счётчику, недописанный файл удалён', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Заголовок обещает 10 байт, тело несёт на байт больше лимита. Проверка
+    // заголовка такого клиента пропускает — ловит только счётчик в потоке.
+    const response = await postFile(
+      filesPath(meetingId),
+      {
+        name: 'протокол.pdf',
+        type: 'application/pdf',
+        body: zeros(MAX_DOCUMENT_SIZE + 1),
+        declaredSize: 10,
+      },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(messageOf(response)).toBe(SIZE_LIMITS.document.tooLarge)
+    // Каталог встречи к этому моменту уже создан, но `.part` в нём не осталось.
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
+  })
+
+  it('без Content-Length судит тот же счётчик', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: zeros(MAX_DOCUMENT_SIZE + 1) },
+      owner.token,
+    )
+
+    expect(response.status).toBe(413)
+    expect(storedFiles(meetingId)).toEqual([])
   })
 })
 

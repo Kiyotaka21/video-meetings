@@ -7,7 +7,7 @@ import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
 import { env } from '../../config/env'
 import { prisma } from '../../db/prisma'
 import { authenticated } from '../auth'
-import { acceptsDeclaredType, type FileFormat, FORMATS } from './limits'
+import { acceptsDeclaredType, type FileFormat, FORMATS, SIZE_LIMITS } from './limits'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск
@@ -147,25 +147,41 @@ const checkFormat = (name: string, contentType: string | undefined): FormatCheck
 const HIGH_WATER_MARK = 1024 * 1024
 
 /**
- * Пишет тело запроса в `.part` и возвращает число записанных байт.
+ * Пишет тело запроса в `.part` и возвращает число записанных байт — или `null`,
+ * если тело вышло за `maxSize`. Тогда `.part` уже удалён.
  *
  * Файл публикуется переименованием уже после вставки строки в базу, поэтому
  * недописанного файла читатель не видит никогда: пока он пишется, его имени нет
  * ни в одной строке.
  */
-const writeBody = async (body: ReadableStream<Uint8Array> | null, partPath: string) => {
+const writeBody = async (
+  body: ReadableStream<Uint8Array> | null,
+  partPath: string,
+  maxSize: number,
+): Promise<number | null> => {
   const writer = Bun.file(partPath).writer({ highWaterMark: HIGH_WATER_MARK })
   let size = 0
+  let tooLarge = false
 
   try {
     if (body) {
       for await (const chunk of body) {
+        size += chunk.byteLength
+
+        // Счётчик обязателен и при проверенном `Content-Length`: заголовок
+        // присылает клиент, и он может соврать или не прислать его вовсе.
+        // Лишний чанк на диск не уходит, а выход из цикла отменяет поток —
+        // остаток тела не читается.
+        if (size > maxSize) {
+          tooLarge = true
+          break
+        }
+
         // `await` обязателен, и это не стилистика: `write` возвращает промис,
         // когда запись отложена, и без ожидания цикл читает сокет быстрее, чем
         // пишет диск. Замер на файле 1 ГБ: +6 МБ RSS с `await` против +2423 МБ
         // без него. Ни типы, ни тесты на мелких файлах разницы не увидят.
         await writer.write(chunk)
-        size += chunk.byteLength
       }
     }
 
@@ -177,6 +193,12 @@ const writeBody = async (body: ReadableStream<Uint8Array> | null, partPath: stri
     await unlink(partPath).catch(() => {})
 
     throw error
+  }
+
+  if (tooLarge) {
+    await unlink(partPath).catch(() => {})
+
+    return null
   }
 
   return size
@@ -227,6 +249,17 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
       }
 
       const { extension, format } = checked
+      const { maxSize, tooLarge } = SIZE_LIMITS[format.kind]
+
+      // Основной рубеж — заявленный размер: браузер всегда шлёт
+      // `Content-Length` у файла в теле XHR, и только отказ до чтения тела
+      // гарантированно доезжает до клиента. 413 посреди чтения рвёт соединение,
+      // и часть клиентов увидит обрыв вместо ответа. Заголовка нет или он не
+      // число — `NaN > maxSize` ложно, и судит счётчик в потоке.
+      if (Number(headers['content-length']) > maxSize) {
+        return status(413, { message: tooLarge })
+      }
+
       const id = Bun.randomUUIDv7()
       const directory = join(env.uploadDir, meeting.id)
       const destination = join(directory, `${id}${extension}`)
@@ -240,7 +273,11 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
       await mkdir(directory, { recursive: true })
 
       const partPath = `${destination}.part`
-      const size = await writeBody(request.body, partPath)
+      const size = await writeBody(request.body, partPath, maxSize)
+
+      if (size === null) {
+        return status(413, { message: tooLarge })
+      }
 
       try {
         const file = await prisma.meetingFile.create({
@@ -278,6 +315,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         400: messageResponse,
         401: messageResponse,
         404: messageResponse,
+        413: messageResponse,
         415: messageResponse,
       },
       detail: { summary: 'Upload a file to a meeting', security },
