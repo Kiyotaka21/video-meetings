@@ -489,13 +489,39 @@ describe('Размер: 413 по Content-Length и по факту записа�
     const owner = await registerUser()
     const meetingId = await createMeeting(owner.token)
 
+    // Настоящие байты, а не только заголовок: тело короче заявленного
+    // `Content-Length` api теперь отбивает как неполное.
     const response = await postFile(
       filesPath(meetingId),
-      { name: 'созвон.mp3', type: 'audio/mpeg', body: 'звук', declaredSize: 51 * 1024 ** 2 },
+      {
+        name: 'созвон.mp3',
+        type: 'audio/mpeg',
+        body: zeros(51 * 1024 ** 2),
+        declaredSize: 51 * 1024 ** 2,
+      },
       owner.token,
     )
 
     expect(response.status).toBe(201)
+  })
+
+  it('тело короче заявленного Content-Length → 400, файл и строка не сохраняются', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Так выглядит загрузка, оборванная на середине, если поток тела закончился
+    // без ошибки: замер в браузере оставил обрезок 85 МБ из 200 как готовый
+    // файл (ресерч, замер 20). Заголовок обещал больше, чем пришло, — значит,
+    // файл неполный, что бы ни случилось с соединением.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: zeros(1000), declaredSize: 5000 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
   })
 
   it('документ ровно на лимит принимается: граница включительно', async () => {

@@ -276,6 +276,19 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
         return status(413, { message: tooLarge })
       }
 
+      // Тело короче собственного `Content-Length` — файл неполный, что бы ни
+      // случилось с соединением. Обычно обрыв приходит `AbortError` из цикла
+      // чтения, но замер в браузере оставил обрезок 85 МБ из 200 как готовый
+      // файл: поток тела закончился без ошибки (ресерч, замер 20). Заголовка
+      // нет (chunked) — сверять не с чем.
+      const declaredSize = headers['content-length']
+
+      if (declaredSize !== undefined && Number(declaredSize) !== size) {
+        await unlink(partPath).catch(() => {})
+
+        return status(400, { message: 'Файл пришёл не целиком — загрузите его ещё раз' })
+      }
+
       try {
         const file = await createWithinLimit({
           id,
