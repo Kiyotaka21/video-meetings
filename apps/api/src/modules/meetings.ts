@@ -3,6 +3,13 @@ import { Elysia, t } from 'elysia'
 import { prisma } from '../db/prisma'
 import { authenticated } from './auth'
 
+/*
+ * Удаления встречи здесь пока нет. Появится `DELETE /meetings/:id` — после
+ * удаления строки он обязан звать `removeMeetingFiles(meetingId)` из
+ * `./files/storage`: каскад в базе убирает строки файлов, но не сами файлы, и
+ * без этого вызова каталог встречи остаётся в `UPLOAD_DIR` навсегда.
+ */
+
 const meetingInput = t.Object({
   title: t.String({ minLength: 1, maxLength: 200 }),
   date: t.String({ format: 'date-time' }),

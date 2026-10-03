@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import type { ActiveUpload } from '~/composables/useActiveUpload'
 import type { MeetingFile } from '~/types/files'
+import { MAX_FILES_PER_MEETING } from '~/utils/files'
 import { plural } from '~/utils/meetings'
 
 interface Props {
@@ -8,13 +10,19 @@ interface Props {
   pending?: boolean
   /** Текст отказа api. `null` — отказа не было. */
   failure?: string | null
-  /** Файл сейчас уезжает на api: кнопка занята. */
-  uploading?: boolean
+  /** Файл, который сейчас уезжает на api, или `null`. */
+  upload?: ActiveUpload | null
+  /** Id файла, который сейчас удаляется. */
+  deletingId?: string | null
 }
 
 interface Emits {
-  upload: [file: File]
+  /** `ignored` — сколько файлов из брошенных разом осталось без внимания. */
+  select: [file: File, ignored: number]
+  cancel: []
   retry: []
+  delete: [file: MeetingFile]
+  linkExpired: []
 }
 
 const props = defineProps<Props>()
@@ -24,48 +32,31 @@ const FILE_FORMS = { one: 'файл', few: 'файла', many: 'файлов' }
 
 const countLabel = computed(() => plural(props.files.length, FILE_FORMS))
 
+const isFull = computed(() => props.files.length >= MAX_FILES_PER_MEETING)
+
+const heading = useTemplateRef<HTMLHeadingElement>('heading')
+
 /**
- * `UFileUpload` держит выбранный файл в `v-model`, а нам он нужен один раз — на
- * отправку. Поэтому значение сразу сбрасывается: иначе второй выбор того же
- * файла не изменит модель и обработчик не сработает.
+ * Куда вернуть фокус после удаления: строка вместе с её кнопкой исчезает, и без
+ * этого фокус улетает в `body`, а Tab начинает обход страницы с начала.
  */
-const selected = ref<File | null>(null)
+const focusHeading = () => heading.value?.focus()
 
-const onSelect = (file: File | null | undefined) => {
-  selected.value = null
-
-  if (file) {
-    emit('upload', file)
-  }
-}
+defineExpose({ focusHeading })
 </script>
 
 <template>
   <section class="flex flex-col gap-4">
-    <div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-      <div class="flex items-center gap-3">
-        <UIcon name="i-lucide-paperclip" class="size-5 shrink-0 text-primary" />
-        <h2 class="text-xl font-semibold tracking-tight text-highlighted">Файлы</h2>
-        <UBadge v-if="!props.pending" color="neutral" variant="subtle" :label="countLabel" />
-      </div>
-
-      <!-- Своя кнопка в слоте, а не `variant="button"`: у встроенной кнопки
-           подпись не рендерится вовсе, остаётся одна иконка. `open()` всё так же
-           открывает скрытый input, который компонент держит у себя. -->
-      <UFileUpload
-        v-slot="{ open }"
-        v-model="selected"
-        :multiple="false"
-        :preview="false"
-        @update:model-value="onSelect"
+    <div class="flex items-center gap-3">
+      <UIcon name="i-lucide-paperclip" class="size-5 shrink-0 text-primary" />
+      <h2
+        ref="heading"
+        tabindex="-1"
+        class="text-xl font-semibold tracking-tight text-highlighted focus:outline-none"
       >
-        <UButton
-          icon="i-lucide-upload"
-          label="Загрузить файл"
-          :loading="props.uploading"
-          @click="open()"
-        />
-      </UFileUpload>
+        Файлы
+      </h2>
+      <UBadge v-if="!props.pending" color="neutral" variant="subtle" :label="countLabel" />
     </div>
 
     <UAlert
@@ -97,22 +88,45 @@ const onSelect = (file: File | null | undefined) => {
       </UCard>
     </div>
 
-    <UCard v-else-if="props.files.length" :ui="{ body: 'py-0 sm:py-0' }">
-      <!-- divide-y вместо рамки у каждой строки: между соседями одна линия,
-           а по краям её даёт сама карточка. -->
-      <ul class="divide-y divide-default">
-        <FilesFileItem v-for="file in props.files" :key="file.id" :file="file" />
-      </ul>
-    </UCard>
+    <template v-else>
+      <!-- Пока файл уезжает, на месте зоны — его строка с процентом и отменой:
+           второй файл параллельно всё равно не принимается, а одна и та же
+           площадь не прыгает между «зона» и «зона плюс строка». -->
+      <FilesUploadProgress v-if="props.upload" :upload="props.upload" @cancel="emit('cancel')" />
 
-    <!-- Пустой блок объясняет, что сюда класть, а не оставляет пустое место.
-         Одной строкой в `description`: `title` у `UEmpty` рендерится жёстко
-         как `<h2>` и внутри секции с таким же `<h2>` дал бы вторую равноправную
-         секцию — заголовок ради оформления статуса. -->
-    <UEmpty
-      v-else
-      icon="i-lucide-paperclip"
-      description="Файлов пока нет. Приложите запись встречи или документ — они будут храниться вместе со встречей."
-    />
+      <!-- Встреча заполнена — зона выключена и объясняет почему, а не ждёт,
+           пока пользователь выберет файл ради отказа. -->
+      <p v-else-if="isFull" class="rounded-lg border border-default p-4 text-sm text-muted">
+        Во встрече уже {{ MAX_FILES_PER_MEETING }} файлов — это предел. Удалите ненужный, чтобы
+        загрузить новый.
+      </p>
+
+      <FilesFileDropzone v-else @select="(file, ignored) => emit('select', file, ignored)" />
+
+      <UCard v-if="props.files.length" :ui="{ body: 'py-0 sm:py-0' }">
+        <!-- divide-y вместо рамки у каждой строки: между соседями одна линия,
+             а по краям её даёт сама карточка. -->
+        <ul class="divide-y divide-default">
+          <FilesFileItem
+            v-for="file in props.files"
+            :key="file.id"
+            :file="file"
+            :deleting="props.deletingId === file.id"
+            @delete="emit('delete', $event)"
+            @link-expired="emit('linkExpired')"
+          />
+        </ul>
+      </UCard>
+
+      <!-- Пустой блок объясняет, что сюда класть, а не оставляет пустое место.
+           Одной строкой в `description`: `title` у `UEmpty` рендерится жёстко
+           как `<h2>` и внутри секции с таким же `<h2>` дал бы вторую равноправную
+           секцию — заголовок ради оформления статуса. -->
+      <UEmpty
+        v-else
+        icon="i-lucide-paperclip"
+        description="Файлов пока нет. Приложите запись встречи или документ — они будут храниться вместе со встречей."
+      />
+    </template>
   </section>
 </template>

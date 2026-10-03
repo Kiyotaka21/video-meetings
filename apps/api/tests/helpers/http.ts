@@ -28,6 +28,13 @@ export const request = async (path: string, init?: RequestInit): Promise<ApiResp
   return { status: response.status, raw, body }
 }
 
+/**
+ * Сырой ответ, без разбора тела: для отдачи файла, где тело — байты, а
+ * контракт — заголовки (`Content-Range`, `Content-Disposition`, `Accept-Ranges`).
+ */
+export const requestRaw = (path: string, init?: RequestInit): Promise<Response> =>
+  app.handle(new Request(`http://localhost${path}`, init))
+
 /** Без токена заголовка нет вовсе — так проверяется и «Authorization не прислали». */
 const authorization = (token?: string): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` }
@@ -41,6 +48,9 @@ export const postJson = (path: string, payload: unknown, token?: string): Promis
 
 export const getJson = (path: string, token?: string): Promise<ApiResponse> =>
   request(path, { method: 'GET', headers: authorization(token) })
+
+export const deleteJson = (path: string, token?: string): Promise<ApiResponse> =>
+  request(path, { method: 'DELETE', headers: authorization(token) })
 
 export interface UploadedFile {
   /** Имя, каким его «выбрал пользователь»: в заголовок уходит percent-encoded. */

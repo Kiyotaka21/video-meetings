@@ -31,6 +31,16 @@ bun run db:migrate     # накатить схему (users, meetings, meeting_f
 Корневой `.env` нужен только чтобы переопределить креды или порт Postgres —
 смотри `.env.example` в корне.
 
+У переменных загрузки файлов дефолты рабочие, трогать их на свежем клоне не нужно:
+
+| Переменная              | Дефолт       | Зачем                                                              |
+| ----------------------- | ------------ | ------------------------------------------------------------------ |
+| `UPLOAD_DIR`            | `./.uploads` | каталог с файлами встреч (от `apps/api`), в git не попадает        |
+| `FILE_LINK_EXPIRES_IN`  | `15m`        | срок ссылки на файл для плеера и скачивания                        |
+| `MAX_REQUEST_BODY_SIZE` | 64 ГиБ       | потолок тела у Bun.serve — держится далеко над лимитом записи 2 ГБ |
+
+Полная таблица окружения api — в `apps/api/CLAUDE.md`, раздел «Окружение».
+
 ## Скрипты (корень)
 
 | Команда                | Что делает                                        |
@@ -94,7 +104,14 @@ docker compose down -v                                   # снести вмес
 **Состояние теперь в двух местах.** В `meeting_files` лежат только метаданные;
 сам файл — на диске api, в каталоге из `UPLOAD_DIR` (по умолчанию
 `apps/api/.uploads`, в git не попадает и в compose не заведён). Дамп базы без
-этого каталога бесполезен, переезд на другую машину переносит оба.
+этого каталога бесполезен, переезд на другую машину переносит оба: дамп
+`pg_dump` и копию `UPLOAD_DIR` снимают в одно время, иначе в списке окажутся
+строки без файлов (ссылка ответит 404) или на диске — файлы без строк.
+
+Удаление файла убирает и строку, и файл с диска. Удаления встречи пока нет;
+когда оно появится, оно обязано убрать и каталог встречи — функция для этого
+уже есть, см. «Встречи» в `apps/api/CLAUDE.md`. `docker compose down -v`
+стирает только базу: каталог `UPLOAD_DIR` после него надо чистить руками.
 
 ```bash
 bun run db:migrate                     # создать и применить миграцию по схеме
@@ -126,11 +143,13 @@ pre-commit-хук husky запускает: перед каждым коммит
 Проект разрабатывается от тестов: сначала контракт в виде падающего теста, потом
 реализация. Тесты в `apps/api/tests/` — исполняемая спецификация API:
 
-| Файл                   | Что фиксирует                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `auth.e2e.test.ts`     | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT               |
-| `meetings.e2e.test.ts` | встречи: guard по токену, изоляция между пользователями, формат дат                              |
-| `files.e2e.test.ts`    | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
+| Файл                       | Что фиксирует                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT               |
+| `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат                              |
+| `files.e2e.test.ts`        | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
+| `file-content.e2e.test.ts` | отдача по ссылке: `Range` побайтово, `Content-Disposition`, кто открывает файл (401/404)         |
+| `file-delete.e2e.test.ts`  | удаление файла: 204, 404 на повтор и чужое, старая ссылка 404, уборка каталога встречи           |
 
 Тесты не чистят за собой базу, а генерируют уникальные адреса, так что `users` и
 `meetings` после прогонов заполняются мусором. Вычистить: `docker compose down -v`
@@ -183,8 +202,8 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 │   └── web                 # Nuxt 4
 │       ├── app             # srcDir Nuxt 4
 │       │   ├── assets/css
-│       │   ├── components  # auth/, dashboard/, meetings/
-│       │   ├── composables # useAuth и useMeetings: токен и запросы к api
+│       │   ├── components  # auth/, dashboard/, meetings/, files/
+│       │   ├── composables # токен, запросы к api, загрузка файла и свежие ссылки
 │       │   ├── layouts
 │       │   ├── middleware  # auth: guard приватных страниц
 │       │   ├── pages       # файловый роутинг
@@ -219,8 +238,9 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
   Классы сортирует `prettier-plugin-tailwindcss`.
 - **Elysia-плагины** — `@elysiajs/cors` (origin'ы из `CORS_ORIGINS`, `credentials: true`),
   `@elysiajs/openapi` (Scalar UI на `/docs`, спека на `/docs/json`; выключен при
-  `NODE_ENV=production`) и `@elysiajs/jwt` (подпись HS256 секретом `JWT_SECRET`,
-  срок жизни из `JWT_EXPIRES_IN`).
+  `NODE_ENV=production`) и `@elysiajs/jwt` — два инстанса: сессионный (HS256 секретом `JWT_SECRET`, срок
+  из `JWT_EXPIRES_IN`) и файловые ссылки (секрет выведен из `JWT_SECRET`, срок из
+  `FILE_LINK_EXPIRES_IN`).
 - **Prisma 7** — ORM для Postgres. У семёрки нет Rust-движка, поэтому клиент ходит в
   базу через драйверный адаптер `@prisma/adapter-pg`, а `DATABASE_URL` задаётся в
   `apps/api/prisma.config.ts`, а не в блоке `datasource`. CLI запускается как
@@ -306,11 +326,23 @@ curl -X POST http://localhost:3000/meetings/<id>/files \
   -H "authorization: Bearer $TOKEN" \
   -H 'x-file-name: notes.md' -H 'content-type: text/markdown' \
   --data-binary @notes.md
-# 201 {"id":"...","name":"notes.md","size":1234,"mimeType":"text/markdown","kind":"document","status":"uploaded","createdAt":"..."}
+# 201 {"id":"...","name":"notes.md","size":1234,"mimeType":"text/markdown","kind":"document","status":"uploaded","createdAt":"...","url":"/meetings/<id>/files/<fileId>/content?token=..."}
 
 curl http://localhost:3000/meetings/<id>/files -H "authorization: Bearer $TOKEN"
 # 200 [...] — файлы этой встречи по дате загрузки
+
+curl "http://localhost:3000<url из списка>" -H 'range: bytes=0-99'
+# 206 и ровно 100 байт; без Range — 200 и файл целиком
+
+curl -X DELETE http://localhost:3000/meetings/<id>/files/<fileId> -H "authorization: Bearer $TOKEN"
+# 204 — строки и файла на диске больше нет, старая ссылка отвечает 404
 ```
+
+Поле `url` — путь отдачи от корня api с коротким файловым токеном в `?token=`:
+`<video>` и ссылка на скачивание не умеют слать `Authorization`. Токен открывает
+ровно один файл и живёт `FILE_LINK_EXPIRES_IN` (15 минут); сессионный токен
+вместо него не годится, и наоборот. Отдача поддерживает `Range` для перемотки и
+отдаёт исходное имя в `Content-Disposition`.
 
 Имя в заголовке обязано быть percent-encoded (`encodeURIComponent`): значение
 HTTP-заголовка — байты Latin-1, и кириллическое имя в него не помещается вовсе.
@@ -326,5 +358,4 @@ HTTP-заголовка — байты Latin-1, и кириллическое и
 | `413` | запись больше 2 ГБ (`mp4 webm mov mp3 m4a wav ogg`) или документ больше 50 МБ (`pdf docx pptx xlsx txt md csv`) |
 | `409` | во встрече уже 20 файлов                                                                                        |
 
-Текст отказа в `message` — по-русски, для показа пользователю как есть. Отдача
-файла и удаление — следующие фазы, см. `docs/plan-meeting-file-upload.md`.
+Текст отказа в `message` — по-русски, для показа пользователю как есть.

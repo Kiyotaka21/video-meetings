@@ -20,6 +20,9 @@ export default tseslint.config(
       '**/coverage/**',
       '**/generated/**',
       '**/*.tsbuildinfo',
+      // Артефакты Playwright MCP и скрипты замеров к ним: в git не попадают, а
+      // гейт `eslint .` смотрит рабочее дерево и падал на браузерных globals.
+      '**/.playwright-mcp/**',
     ],
   },
 

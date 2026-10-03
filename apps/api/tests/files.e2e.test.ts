@@ -12,9 +12,18 @@ import {
   MAX_FILES_PER_MEETING,
   SIZE_LIMITS,
 } from '../src/modules/files/limits'
-import { getJson, postFile, postJson, request, type ApiResponse } from './helpers/http'
+import {
+  asFile,
+  asFiles,
+  createMeeting,
+  filesPath,
+  meetingDir,
+  type MeetingFile,
+  messageOf,
+  storedFiles,
+} from './helpers/files'
+import { deleteJson, getJson, postFile, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
-import { TEST_UPLOAD_DIR } from './setup'
 
 /**
  * Контракт файлов встречи, e2e через `app.handle`. Оба маршрута — под
@@ -25,45 +34,6 @@ import { TEST_UPLOAD_DIR } from './setup'
  * Файлы пишутся во временный каталог из `tests/setup.ts`, не в рабочий `.uploads`.
  */
 
-const FILE_FIELDS = ['createdAt', 'id', 'kind', 'mimeType', 'name', 'size', 'status']
-
-interface MeetingFile {
-  id: string
-  name: string
-  size: number
-  mimeType: string
-  kind: string
-  status: string
-  createdAt: string
-}
-
-const asFile = (body: unknown): MeetingFile => {
-  expect(Object.keys(body as object).sort()).toEqual(FILE_FIELDS)
-
-  return body as MeetingFile
-}
-
-const asFiles = (body: unknown): MeetingFile[] => {
-  expect(Array.isArray(body)).toBe(true)
-
-  return body as MeetingFile[]
-}
-
-const filesPath = (meetingId: string): string => `/meetings/${meetingId}/files`
-
-/** Встреча нужна почти каждому тесту, а её собственный контракт проверяет соседний файл. */
-const createMeeting = async (token: string): Promise<string> => {
-  const response = await postJson(
-    '/meetings',
-    { title: 'Встреча с файлами', date: '2026-03-01T10:00:00.000Z', participants: [] },
-    token,
-  )
-
-  expect(response.status).toBe(201)
-
-  return (response.body as { id: string }).id
-}
-
 const DOCUMENT_TEXT = 'Итоги квартала: договорились созвониться ещё раз.'
 const DOCUMENT_SIZE = new TextEncoder().encode(DOCUMENT_TEXT).byteLength
 
@@ -72,17 +42,6 @@ const document = (name = 'Отчёт за квартал.pdf') => ({
   type: 'application/pdf',
   body: DOCUMENT_TEXT,
 })
-
-/** Каталог встречи на диске: путь целиком генерирует api, клиент его не видит. */
-const meetingDir = (meetingId: string): string => join(TEST_UPLOAD_DIR, meetingId)
-
-/**
- * Что лежит в каталоге встречи. Каталога нет — пустой список: отказ до записи
- * его не создаёт, отказ посреди записи оставляет пустым, и для теста оба случая
- * значат одно — на диске после отказа ничего не осталось.
- */
-const storedFiles = (meetingId: string): string[] =>
-  existsSync(meetingDir(meetingId)) ? readdirSync(meetingDir(meetingId)).sort() : []
 
 /**
  * Ждёт, пока какой-нибудь запрос в нашей базе встанет в очередь за замком.
@@ -106,14 +65,6 @@ const waitForLockWaiter = async (): Promise<void> => {
   throw new Error('Загрузка так и не встала в очередь за замком на встрече')
 }
 
-const messageOf = (response: ApiResponse): string => {
-  const { message } = response.body as { message: unknown }
-
-  expect(typeof message).toBe('string')
-
-  return message as string
-}
-
 const uploadDocument = async (meetingId: string, token: string, name?: string) =>
   asFile((await postFile(filesPath(meetingId), document(name), token)).body)
 
@@ -125,6 +76,12 @@ describe('Авторизация на /meetings/:id/files', () => {
       (meetingId, token) => postFile(filesPath(meetingId), document(), token),
     ],
     ['GET /meetings/:id/files', (meetingId, token) => getJson(filesPath(meetingId), token)],
+    // Встреча проверяется раньше файла: на чужую встречу ответ тот же 404 с
+    // «Meeting not found», даже если такого файла нет нигде.
+    [
+      'DELETE /meetings/:id/files/:fileId',
+      (meetingId, token) => deleteJson(`${filesPath(meetingId)}/${randomUUID()}`, token),
+    ],
   ]
 
   for (const [name, call] of routes) {
@@ -532,13 +489,39 @@ describe('Размер: 413 по Content-Length и по факту записа�
     const owner = await registerUser()
     const meetingId = await createMeeting(owner.token)
 
+    // Настоящие байты, а не только заголовок: тело короче заявленного
+    // `Content-Length` api теперь отбивает как неполное.
     const response = await postFile(
       filesPath(meetingId),
-      { name: 'созвон.mp3', type: 'audio/mpeg', body: 'звук', declaredSize: 51 * 1024 ** 2 },
+      {
+        name: 'созвон.mp3',
+        type: 'audio/mpeg',
+        body: zeros(51 * 1024 ** 2),
+        declaredSize: 51 * 1024 ** 2,
+      },
       owner.token,
     )
 
     expect(response.status).toBe(201)
+  })
+
+  it('тело короче заявленного Content-Length → 400, файл и строка не сохраняются', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Так выглядит загрузка, оборванная на середине, если поток тела закончился
+    // без ошибки: замер в браузере оставил обрезок 85 МБ из 200 как готовый
+    // файл (ресерч, замер 20). Заголовок обещал больше, чем пришло, — значит,
+    // файл неполный, что бы ни случилось с соединением.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: zeros(1000), declaredSize: 5000 },
+      owner.token,
+    )
+
+    expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
   })
 
   it('документ ровно на лимит принимается: граница включительно', async () => {
@@ -804,8 +787,15 @@ describe('GET /meetings/:id/files', () => {
     const response = await getJson(filesPath(meetingId), owner.token)
     const files = asFiles(response.body)
 
+    // Ссылка выписывается заново на каждый ответ: токен совпадёт, только если
+    // оба ответа уложились в одну секунду `iat`, — поэтому сравнивается путь.
+    const withLinkPath = ({ url, ...file }: MeetingFile) => ({
+      ...file,
+      url: new URL(url, 'http://localhost').pathname,
+    })
+
     expect(response.status).toBe(200)
-    expect(files).toEqual([first, second])
+    expect(files.map(withLinkPath)).toEqual([first, second].map(withLinkPath))
   })
 
   it('файлы соседних встреч не смешиваются', async () => {

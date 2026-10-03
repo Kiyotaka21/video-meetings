@@ -47,5 +47,17 @@ export const apiMessageOf = (error: unknown): string | undefined => {
  */
 export const isUnauthorized = (error: unknown): boolean => statusOf(error) === 401
 
+/**
+ * Полный адрес на api по пути от его корня — для мест, где `$fetch` с `baseURL`
+ * не участвует: `<video src>`, ссылка на скачивание, `XMLHttpRequest`. Поле `url`
+ * у файла приходит именно путём (api не знает, под каким origin'ом его видит
+ * браузер), и вставленное как есть оно ушло бы на origin фронтенда.
+ *
+ * Склейка строкой, а не `new URL(path, apiUrl)`: путь с ведущим слэшем
+ * отбросил бы префикс у адреса вида `https://host/api`.
+ */
+export const apiHref = (apiUrl: string, path: string): string =>
+  `${apiUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+
 /** Один текст на все запросы: причина у пользователя одна и та же. */
 export const NO_CONNECTION_MESSAGE = 'Нет связи с API. Проверьте, что бэкенд запущен.'
