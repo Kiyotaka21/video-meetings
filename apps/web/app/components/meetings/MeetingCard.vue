@@ -57,11 +57,17 @@ const countLabel = computed(() => plural(participants.value.length, PARTICIPANT_
          четыре заглушки дали бы четыре живых региона с чужим английским
          словом. О загрузке сообщает один `role="status"` на странице. -->
     <div v-else-if="props.pending" aria-hidden="true" class="flex flex-col gap-4">
+      <!-- Высоты — по высоте строк настоящей карточки: `h1` — `text-2xl`/32px и
+           `sm:text-3xl`/36px, дата — `text-base`/24px, «Без участников» —
+           `text-sm`/20px. На десктопе с прежними h-8/h-5/h-6 заголовок блока
+           «Файлы» уезжал на 4px, когда приходили данные (замер). Высоту списка
+           участников заранее не знать — заглушка повторяет самую частую
+           строку. -->
       <div class="flex flex-col gap-2">
-        <USkeleton class="h-8 w-64 sm:w-96" />
-        <USkeleton class="h-5 w-48" />
+        <USkeleton class="h-8 w-64 sm:h-9 sm:w-96" />
+        <USkeleton class="h-6 w-48" />
       </div>
-      <USkeleton class="h-6 w-56" />
+      <USkeleton class="h-5 w-56" />
     </div>
   </UCard>
 </template>

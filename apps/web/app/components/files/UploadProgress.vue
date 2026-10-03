@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ActiveUpload } from '~/composables/useActiveUpload'
 import { formatFileSize } from '~/utils/files'
+import { plural } from '~/utils/meetings'
 
 interface Props {
   upload: ActiveUpload
@@ -24,8 +25,18 @@ const statusText = computed(() =>
   isSaving.value ? 'Сохраняем файл на сервере…' : `Отправлено ${props.upload.percent} %`,
 )
 
-/** Чтение процента скринридером — словами, а не голым числом. */
-const valueText = (value: number | null | undefined) => `${value ?? 0} процентов`
+const PERCENT_FORMS = { one: 'процент', few: 'процента', many: 'процентов' }
+
+/** Чтение процента скринридером — словами и в нужной форме: «34 процента». */
+const valueText = (value: number | null | undefined) => plural(value ?? 0, PERCENT_FORMS)
+
+/**
+ * Имя полосы задаётся через `getValueLabel`, а не `aria-label`: Reka ставит
+ * `aria-label` из этой функции сам и перетирает проп — по умолчанию именем
+ * полосы становилось «0%», то есть скринридер читал процент дважды и не знал,
+ * что именно грузится.
+ */
+const valueLabel = () => `Загрузка ${props.upload.name}`
 
 /**
  * Живой регион объявляет только смену фазы. Процент в нём менялся бы десятки
@@ -69,7 +80,7 @@ const phaseAnnouncement = computed(() =>
       :max="100"
       size="sm"
       :get-value-text="valueText"
-      :aria-label="`Загрузка ${props.upload.name}`"
+      :get-value-label="valueLabel"
     />
   </div>
 </template>

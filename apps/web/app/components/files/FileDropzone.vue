@@ -44,7 +44,10 @@ const onSelect = (file: File | null | undefined) => {
   <!-- `:model-value="null"` — компонент не держит выбранный файл: он нужен один
        раз, на отправку. `reset` очищает скрытый input при каждом открытии
        диалога — иначе повторный выбор того же файла (после отказа или обрыва)
-       не давал `change`, и ничего не происходило. -->
+       не давал `change`, и ничего не происходило.
+       Рамка — цветом `text-muted`, а не `border-default`: пунктир здесь —
+       единственное, что показывает границу зоны для дропа, а токены рамок
+       Nuxt UI дают 1.19–1.7:1 при норме 3:1 (`text-muted` — 6.75 и 4.83). -->
   <div @drop.capture="onDropCapture">
     <UFileUpload
       :model-value="null"
@@ -57,7 +60,7 @@ const onSelect = (file: File | null | undefined) => {
       label="Перетащите файл сюда или нажмите, чтобы выбрать"
       :description="description"
       class="w-full"
-      :ui="{ base: 'min-h-36' }"
+      :ui="{ base: 'min-h-36 border-(color:--ui-text-muted)' }"
       @update:model-value="onSelect"
     />
   </div>
