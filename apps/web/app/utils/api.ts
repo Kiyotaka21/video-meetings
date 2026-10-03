@@ -20,6 +20,26 @@ export const statusOf = (error: unknown): number | undefined =>
     : undefined
 
 /**
+ * `message` из тела отказа — у ofetch тело ответа лежит в `data`. Нужен там,
+ * где api формулирует причину для пользователя сам (лимиты загрузки файла);
+ * служебные английские сообщения остальных отказов показывать не надо.
+ */
+export const apiMessageOf = (error: unknown): string | undefined => {
+  if (typeof error !== 'object' || error === null || !('data' in error)) {
+    return undefined
+  }
+
+  const { data } = error
+
+  return typeof data === 'object' &&
+    data !== null &&
+    'message' in data &&
+    typeof data.message === 'string'
+    ? data.message
+    : undefined
+}
+
+/**
  * Api не принял токен: истёк, выпущен против другой базы или учётку удалили.
  * Все три случая приезжают одним 401 — намеренно, см. `authenticated` и
  * `GET /auth/me` в `apps/api/src/modules/auth.ts`. Поэтому и обработка одна:
