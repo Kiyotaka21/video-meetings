@@ -1,4 +1,4 @@
-import { unlink } from 'node:fs/promises'
+import { rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative } from 'node:path'
 
 import { env } from '../../config/env'
@@ -105,3 +105,28 @@ export const meetingDirectory = (meetingId: string): string => insideUploadDir(m
  * разделители машины.
  */
 export const storedPath = (relativePath: string): string => insideUploadDir(relativePath)
+
+/**
+ * Убирает файл с диска. Пропавший уже файл — не ошибка (`force`): строки в базе
+ * к этому моменту нет, и цель «файла нет» достигнута.
+ */
+export const removeStoredFile = async (relativePath: string): Promise<void> => {
+  await rm(storedPath(relativePath), { force: true })
+}
+
+/**
+ * Убирает каталог встречи целиком — вместе с `.part` от загрузок, оборванных
+ * падением процесса: у них нет строки в базе, и подобрать их больше некому.
+ * `force` делает функцию идемпотентной.
+ *
+ * **Роута удаления встречи пока нет, и функцию зовут только тесты.** Появится
+ * `DELETE /meetings/:id` — он обязан звать её после удаления строки встречи:
+ * каскад в базе убирает строки файлов, но не сами файлы, и без этого вызова
+ * каталоги остаются на диске навсегда.
+ *
+ * `meetingDirectory` отказывается от пустого id и от `..`: иначе кривой
+ * аргумент превратился бы в `rm -rf UPLOAD_DIR`.
+ */
+export const removeMeetingFiles = async (meetingId: string): Promise<void> => {
+  await rm(meetingDirectory(meetingId), { recursive: true, force: true })
+}

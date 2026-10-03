@@ -49,6 +49,9 @@ export const postJson = (path: string, payload: unknown, token?: string): Promis
 export const getJson = (path: string, token?: string): Promise<ApiResponse> =>
   request(path, { method: 'GET', headers: authorization(token) })
 
+export const deleteJson = (path: string, token?: string): Promise<ApiResponse> =>
+  request(path, { method: 'DELETE', headers: authorization(token) })
+
 export interface UploadedFile {
   /** Имя, каким его «выбрал пользователь»: в заголовок уходит percent-encoded. */
   name: string

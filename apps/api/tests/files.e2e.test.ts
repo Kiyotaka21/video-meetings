@@ -22,7 +22,7 @@ import {
   messageOf,
   storedFiles,
 } from './helpers/files'
-import { getJson, postFile, request, type ApiResponse } from './helpers/http'
+import { deleteJson, getJson, postFile, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
 
 /**
@@ -76,6 +76,12 @@ describe('Авторизация на /meetings/:id/files', () => {
       (meetingId, token) => postFile(filesPath(meetingId), document(), token),
     ],
     ['GET /meetings/:id/files', (meetingId, token) => getJson(filesPath(meetingId), token)],
+    // Встреча проверяется раньше файла: на чужую встречу ответ тот же 404 с
+    // «Meeting not found», даже если такого файла нет нигде.
+    [
+      'DELETE /meetings/:id/files/:fileId',
+      (meetingId, token) => deleteJson(`${filesPath(meetingId)}/${randomUUID()}`, token),
+    ],
   ]
 
   for (const [name, call] of routes) {

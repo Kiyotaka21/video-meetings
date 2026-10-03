@@ -17,7 +17,7 @@ import {
   TOO_MANY_FILES,
 } from './limits'
 import { contentPath, fileLinkJwt } from './link'
-import { meetingDirectory, storedPath, writeBody } from './storage'
+import { meetingDirectory, removeStoredFile, storedPath, writeBody } from './storage'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск
@@ -191,6 +191,19 @@ const createWithinLimit = (data: Prisma.MeetingFileUncheckedCreateInput) =>
     return tx.meetingFile.create({ data, select: publicFields })
   })
 
+/**
+ * Владелец в `where`, а не проверка после выборки: чужая встреча не находится
+ * вовсе и отвечает тем же 404, что и несуществующая.
+ */
+const findOwnMeeting = (meetingId: string, userId: string) =>
+  prisma.meeting.findFirst({ where: { id: meetingId, ownerId: userId }, select: { id: true } })
+
+/** P2025 — строка для `delete` не нашлась: файла нет или он в другой встрече. */
+const isRecordNotFound = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025'
+
+const FILE_NOT_FOUND = { message: 'File not found' } as const
+
 const security = [{ bearerAuth: [] }]
 
 /**
@@ -204,12 +217,7 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
   .post(
     '/:id/files',
     async ({ params, request, headers, userId, fileJwt, status }) => {
-      // Владелец в `where`, а не проверка после выборки: чужая встреча не
-      // находится вовсе и отвечает тем же 404, что и несуществующая.
-      const meeting = await prisma.meeting.findFirst({
-        where: { id: params.id, ownerId: userId },
-        select: { id: true },
-      })
+      const meeting = await findOwnMeeting(params.id, userId)
 
       if (!meeting) {
         return status(404, MEETING_NOT_FOUND)
@@ -315,10 +323,7 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
   .get(
     '/:id/files',
     async ({ params, userId, fileJwt, status }) => {
-      const meeting = await prisma.meeting.findFirst({
-        where: { id: params.id, ownerId: userId },
-        select: { id: true },
-      })
+      const meeting = await findOwnMeeting(params.id, userId)
 
       if (!meeting) {
         return status(404, MEETING_NOT_FOUND)
@@ -345,6 +350,51 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
         404: messageResponse,
       },
       detail: { summary: 'List files of a meeting', security },
+    },
+  )
+  .delete(
+    '/:id/files/:fileId',
+    async ({ params, userId, status }) => {
+      const meeting = await findOwnMeeting(params.id, userId)
+
+      if (!meeting) {
+        return status(404, MEETING_NOT_FOUND)
+      }
+
+      // Сначала строка, потом диск (ресерч, 6): файл без строки безвреден и
+      // уйдёт вместе с каталогом встречи, а строка без файла — битая ссылка в
+      // интерфейсе. Удаление по паре (файл, встреча) атомарно: из двух
+      // одновременных запросов второй получит P2025, то есть 404, а не 500.
+      let removed: { path: string }
+
+      try {
+        removed = await prisma.meetingFile.delete({
+          where: { id: params.fileId, meetingId: meeting.id },
+          select: { path: true },
+        })
+      } catch (error) {
+        if (isRecordNotFound(error)) {
+          return status(404, FILE_NOT_FOUND)
+        }
+
+        throw error
+      }
+
+      // На Windows файл удаляется и тогда, когда его ещё отдают по ссылке, —
+      // читатель дочитывает до конца (ресерч, замер 11). Новых читателей не
+      // будет: отдача сначала ищет строку, а её уже нет.
+      await removeStoredFile(removed.path)
+
+      return status(204, undefined)
+    },
+    {
+      params: t.Object({ id: t.String(), fileId: t.String() }),
+      response: {
+        204: t.Undefined(),
+        401: messageResponse,
+        404: messageResponse,
+      },
+      detail: { summary: 'Delete a file of a meeting', security },
     },
   )
 
