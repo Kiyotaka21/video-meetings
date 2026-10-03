@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
@@ -274,6 +274,7 @@ describe('POST /meetings/:id/files', () => {
     })
 
     expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
   })
 
   it('битое percent-кодирование в имени → 400, а не 500', async () => {
@@ -288,6 +289,7 @@ describe('POST /meetings/:id/files', () => {
     })
 
     expect(response.status).toBe(400)
+    expect(storedFiles(meetingId)).toEqual([])
   })
 
   it('на чужую встречу не создаёт каталог на диске', async () => {
@@ -697,6 +699,87 @@ describe(`Число файлов: 409 на ${MAX_FILES_PER_MEETING + 1}-й`, ()
     )
     // Принятые 19 и ни одного `.part`: у «соседа» файла на диске нет вовсе.
     expect(storedFiles(meetingId)).toHaveLength(MAX_FILES_PER_MEETING - 1)
+  })
+})
+
+describe('Имя файла не участвует в пути на диске', () => {
+  // Голое `../../etc/passwd` расширения не имеет — `extname` даёт пустую строку,
+  // — и отбивается форматом раньше, чем дело доходит до пути. Проверять, куда
+  // ляжет файл, приходится на имени с разрешённым расширением.
+  it('`../../etc/passwd` без расширения → 415, на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: '../../etc/passwd', body: 'root:x:0:0' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(existsSync(resolve(meetingDir(meetingId), '../../etc'))).toBe(false)
+  })
+
+  for (const name of ['../../etc/passwd.txt', '..\\..\\etc\\passwd.txt']) {
+    it(`«${name}» ложится внутрь каталога встречи, а в списке — исходным именем`, async () => {
+      const owner = await registerUser()
+      const meetingId = await createMeeting(owner.token)
+
+      const response = await postFile(
+        filesPath(meetingId),
+        { name, type: 'text/plain', body: 'root:x:0:0' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+
+      const file = asFile(response.body)
+
+      // Путь — `<id встречи>/<id файла><расширение из таблицы>`: из имени в него
+      // не доезжает ни один символ, поэтому и `../`, и `..\` тут бессильны.
+      expect(storedFiles(meetingId)).toEqual([`${file.id}.txt`])
+      expect(existsSync(resolve(meetingDir(meetingId), '../../etc'))).toBe(false)
+      expect(existsSync(resolve(meetingDir(meetingId), '..\\..\\etc'))).toBe(false)
+
+      const listed = asFiles((await getJson(filesPath(meetingId), owner.token)).body)
+
+      expect(listed.map((item) => item.name)).toEqual([name])
+    })
+  }
+})
+
+describe('Обрыв посреди тела', () => {
+  it('недописанный файл удаляется, строки в базе нет', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Так через `app.handle` выглядит клиент, который нажал «Отменить» или
+    // потерял сеть: на живом сервере цикл чтения бросает `AbortError`.
+    let sent = false
+    const broken = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) {
+          controller.error(new Error('Соединение оборвалось'))
+
+          return
+        }
+
+        sent = true
+        controller.enqueue(new Uint8Array(64 * 1024))
+      },
+    })
+
+    await postFile(
+      filesPath(meetingId),
+      { name: 'протокол.pdf', type: 'application/pdf', body: broken },
+      owner.token,
+    )
+
+    // Код ответа на оборванный запрос никто не прочитает — важно, что на
+    // диске и в базе от него ничего не осталось.
+    expect(storedFiles(meetingId)).toEqual([])
+    expect(asFiles((await getJson(filesPath(meetingId), owner.token)).body)).toEqual([])
   })
 })
 
