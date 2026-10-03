@@ -7,6 +7,7 @@ import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
 import { env } from '../../config/env'
 import { prisma } from '../../db/prisma'
 import { authenticated } from '../auth'
+import { acceptsDeclaredType, type FileFormat, FORMATS } from './limits'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск
@@ -95,44 +96,51 @@ const decodeFileName = (header: string | undefined): string | null => {
   return name.length > 0 && name.length <= MAX_NAME_LENGTH ? name : null
 }
 
-/**
- * Расширение для имени файла на диске. Шаблон намеренно узкий: всё, что в него
- * не попало, уезжает без расширения — в путь не должно доехать ничего из имени,
- * кроме безобидного хвоста. В фазе 2 его сменит таблица форматов, которая ещё и
- * отвечает 415 на чужое расширение.
- */
-const SAFE_EXTENSION = /^\.[a-z0-9]{1,16}$/
+type FormatCheck =
+  { ok: true; extension: string; format: FileFormat } | { ok: false; message: string }
 
-const extensionOf = (name: string): string => {
-  // `extname('../../etc/passwd')` и `extname('.bashrc')` дают пустую строку:
-  // ведущая точка расширением не считается, каталоги — тем более.
-  const extension = extname(name).toLowerCase()
+/** Расширение, которое не стыдно повторить в тексте отказа: без мусора из заголовка. */
+const PRINTABLE_EXTENSION = /^\.[a-z0-9]{1,16}$/
 
-  return SAFE_EXTENSION.test(extension) ? extension : ''
+const unsupportedFormat = (extension: string): string => {
+  if (extension === '') {
+    return 'Файлы без расширения не поддерживаются'
+  }
+
+  return PRINTABLE_EXTENSION.test(extension)
+    ? `Формат ${extension} не поддерживается`
+    : 'Формат файла не поддерживается'
 }
 
 /**
- * Группу решает расширение, а не заявленный тип: браузер на Windows сплошь и
- * рядом отдаёт пустой тип или `application/octet-stream` для `.m4a` и `.webm` —
- * MIME там берётся из реестра ОС. Список — из PRD; в фазе 2 он станет частью
- * общей таблицы форматов вместе с лимитами.
+ * Формат по имени и заявленному типу. Расширение решает, тип только
+ * подтверждает (ресерч, раздел 2.5):
+ *
+ * 1. расширения нет в таблице — отказ;
+ * 2. тип пустой или octet-stream — судим по одному расширению;
+ * 3. тип непустой и не из списка расширения — отказ.
+ *
+ * Буквальное «расширение или тип вне списков» отбило бы честный `.m4a` из Chrome
+ * на Windows: тип там берётся из реестра ОС и для таких расширений часто пуст.
  */
-const RECORDING_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.mp3', '.m4a', '.wav', '.ogg'])
+const checkFormat = (name: string, contentType: string | undefined): FormatCheck => {
+  // `extname('../../etc/passwd')` и `extname('.bashrc')` дают пустую строку:
+  // ведущая точка расширением не считается, каталоги — тем более.
+  const extension = extname(name).toLowerCase()
+  const format = FORMATS.get(extension)
 
-const kindOf = (extension: string): FileKind =>
-  RECORDING_EXTENSIONS.has(extension) ? 'recording' : 'document'
+  if (!format) {
+    return { ok: false, message: unsupportedFormat(extension) }
+  }
 
-const DEFAULT_MIME_TYPE = 'application/octet-stream'
+  // Параметры (`; charset=`, `; codecs=`) к формату отношения не имеют.
+  const declared = contentType?.split(';')[0]?.trim().toLowerCase() ?? ''
 
-/**
- * Заявленный тип без параметров (`; charset=`). Доверенным он не считается:
- * при отдаче (фаза 3) `Content-Type` берётся из таблицы форматов по расширению,
- * иначе `.pdf`, загруженный как `text/html`, отдавался бы как HTML с нашего origin'а.
- */
-const declaredMimeType = (header: string | undefined): string => {
-  const declared = header?.split(';')[0]?.trim().toLowerCase()
+  if (!acceptsDeclaredType(format, declared)) {
+    return { ok: false, message: `Заявленный тип файла не соответствует формату ${extension}` }
+  }
 
-  return declared ? declared : DEFAULT_MIME_TYPE
+  return { ok: true, extension, format }
 }
 
 /** 1 МиБ: столько же, сколько в замере памяти из ресерча. */
@@ -176,7 +184,7 @@ const writeBody = async (body: ReadableStream<Uint8Array> | null, partPath: stri
 
 /**
  * Путь собирается из проверенного id встречи, сгенерированного id файла и
- * расширения по шаблону, так что `../` из имени сюда не доедет по построению.
+ * ключа таблицы форматов, так что `../` из имени сюда не доедет по построению.
  * Проверка всё равно стоит: она переживёт правку, которая решит подставить в
  * путь что-нибудь пользовательское.
  */
@@ -210,8 +218,16 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         return status(400, { message: 'Invalid or missing X-File-Name header' })
       }
 
+      // До открытия файла на запись: отказ по формату не должен стоить ни
+      // каталога на диске, ни прочитанного байта тела.
+      const checked = checkFormat(name, headers['content-type'])
+
+      if (!checked.ok) {
+        return status(415, { message: checked.message })
+      }
+
+      const { extension, format } = checked
       const id = Bun.randomUUIDv7()
-      const extension = extensionOf(name)
       const directory = join(env.uploadDir, meeting.id)
       const destination = join(directory, `${id}${extension}`)
 
@@ -232,8 +248,9 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
             id,
             name,
             size: BigInt(size),
-            mimeType: declaredMimeType(headers['content-type']),
-            kind: kindOf(extension),
+            // Тип формата, а не заявленный: заявленный только проверен выше.
+            mimeType: format.mimeType,
+            kind: format.kind,
             // Путь относительный и всегда со слэшем: переезд каталога загрузок
             // на другую машину не должен переписывать все строки разом.
             path: `${meeting.id}/${id}${extension}`,
@@ -261,6 +278,7 @@ export const filesModule = new Elysia({ prefix: '/meetings', tags: ['Files'] })
         400: messageResponse,
         401: messageResponse,
         404: messageResponse,
+        415: messageResponse,
       },
       detail: { summary: 'Upload a file to a meeting', security },
     },

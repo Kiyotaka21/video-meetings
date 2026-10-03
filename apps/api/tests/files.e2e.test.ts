@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
+import { FORMATS } from '../src/modules/files/limits'
 import { getJson, postFile, postJson, request, type ApiResponse } from './helpers/http'
 import { registerUser } from './helpers/users'
 import { TEST_UPLOAD_DIR } from './setup'
@@ -68,6 +69,22 @@ const document = (name = 'Отчёт за квартал.pdf') => ({
 
 /** Каталог встречи на диске: путь целиком генерирует api, клиент его не видит. */
 const meetingDir = (meetingId: string): string => join(TEST_UPLOAD_DIR, meetingId)
+
+/**
+ * Что лежит в каталоге встречи. Каталога нет — пустой список: отказ до записи
+ * его не создаёт, отказ посреди записи оставляет пустым, и для теста оба случая
+ * значат одно — на диске после отказа ничего не осталось.
+ */
+const storedFiles = (meetingId: string): string[] =>
+  existsSync(meetingDir(meetingId)) ? readdirSync(meetingDir(meetingId)).sort() : []
+
+const messageOf = (response: ApiResponse): string => {
+  const { message } = response.body as { message: unknown }
+
+  expect(typeof message).toBe('string')
+
+  return message as string
+}
 
 const uploadDocument = async (meetingId: string, token: string, name?: string) =>
   asFile((await postFile(filesPath(meetingId), document(name), token)).body)
@@ -204,7 +221,7 @@ describe('POST /meetings/:id/files', () => {
     expect(asFile(notes.body).kind).toBe('document')
   })
 
-  it('принимает файл без заголовка Content-Type', async () => {
+  it('принимает файл без заголовка Content-Type и пишет тип его формата', async () => {
     const owner = await registerUser()
     const meetingId = await createMeeting(owner.token)
 
@@ -215,7 +232,7 @@ describe('POST /meetings/:id/files', () => {
     )
 
     expect(response.status).toBe(201)
-    expect(asFile(response.body).mimeType).toBe('application/octet-stream')
+    expect(asFile(response.body).mimeType).toBe('text/plain')
   })
 
   it('без заголовка с именем → 400', async () => {
@@ -254,6 +271,167 @@ describe('POST /meetings/:id/files', () => {
 
     expect(response.status).toBe(404)
     expect(() => readdirSync(meetingDir(meetingId))).toThrow()
+  })
+})
+
+describe('Форматы: 415 на всё, чего нет в таблице', () => {
+  it('.zip → 415 с текстом про формат, а на диске ничего', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'архив встречи.zip', type: 'application/zip', body: 'PK' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    // Текст уходит пользователю как есть — фронтенд показывает его в отказе.
+    expect(messageOf(response)).toBe('Формат .zip не поддерживается')
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('.exe → 415', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'setup.exe', type: 'application/x-msdownload', body: 'MZ' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('файл без расширения → 415', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'README', type: 'text/plain', body: 'без расширения' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('заявленный тип вне списка своего расширения → 415: .pdf как text/html', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Подмена типа: такой файл при отдаче уехал бы HTML'ем с origin'а api.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'отчёт.pdf', type: 'text/html', body: '<script>alert(1)</script>' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(415)
+    expect(messageOf(response)).toContain('.pdf')
+    expect(storedFiles(meetingId)).toEqual([])
+  })
+
+  it('расширение сравнивается без учёта регистра: .PDF ложится на диск как .pdf', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'СКАН.PDF', type: 'application/pdf', body: '%PDF' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+
+    const file = asFile(response.body)
+
+    expect(file.name).toBe('СКАН.PDF')
+    expect(storedFiles(meetingId)).toEqual([`${file.id}.pdf`])
+  })
+
+  // Браузер берёт тип из реестра ОС, и на Windows для .m4a и .webm его там
+  // сплошь и рядом нет: приезжает пустая строка или octet-stream. Отбить такой
+  // файл — значит сломать честную загрузку на пустом месте.
+  for (const declared of [undefined, '', 'application/octet-stream']) {
+    it(`тип «${declared ?? 'нет заголовка'}» у .m4a не мешает: в метаданных тип формата`, async () => {
+      const owner = await registerUser()
+      const meetingId = await createMeeting(owner.token)
+
+      const response = await postFile(
+        filesPath(meetingId),
+        { name: 'созвон.m4a', type: declared, body: 'звук' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+      expect(asFile(response.body).mimeType).toBe('audio/mp4')
+      expect(asFile(response.body).kind).toBe('recording')
+    })
+  }
+
+  it('в метаданные уходит тип формата, а не заявленный: .m4a как audio/x-m4a', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'созвон.m4a', type: 'audio/x-m4a; codecs=mp4a.40.2', body: 'звук' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).mimeType).toBe('audio/mp4')
+  })
+
+  it('CSV с типом от Excel на Windows принимается', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    // Установленный Excel перехватывает .csv в реестре, и браузер шлёт его тип.
+    const response = await postFile(
+      filesPath(meetingId),
+      { name: 'участники.csv', type: 'application/vnd.ms-excel', body: 'email\n' },
+      owner.token,
+    )
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).mimeType).toBe('text/csv')
+  })
+
+  it('таблица форматов — ровно список из PRD, по группам', () => {
+    const extensionsOf = (kind: string) =>
+      [...FORMATS]
+        .filter(([, format]) => format.kind === kind)
+        .map(([extension]) => extension)
+        .sort()
+
+    expect(extensionsOf('recording')).toEqual(
+      ['.m4a', '.mov', '.mp3', '.mp4', '.ogg', '.wav', '.webm'].sort(),
+    )
+    expect(extensionsOf('document')).toEqual(
+      ['.csv', '.docx', '.md', '.pdf', '.pptx', '.txt', '.xlsx'].sort(),
+    )
+  })
+
+  it('каждый формат из таблицы принимается со своим типом и своей группой', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    for (const [extension, format] of FORMATS) {
+      const response = await postFile(
+        filesPath(meetingId),
+        { name: `файл${extension}`, type: format.mimeType, body: 'байты' },
+        owner.token,
+      )
+
+      expect(response.status).toBe(201)
+      expect(asFile(response.body).kind).toBe(format.kind)
+      expect(asFile(response.body).mimeType).toBe(format.mimeType)
+    }
   })
 })
 
