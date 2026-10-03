@@ -3,10 +3,10 @@ import { extname, isAbsolute, join, relative } from 'node:path'
 
 import { Elysia, t } from 'elysia'
 
-import type { FileKind, FileStatus } from '../../generated/prisma/enums'
-import { env } from '../config/env'
-import { prisma } from '../db/prisma'
-import { authenticated } from './auth'
+import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
+import { env } from '../../config/env'
+import { prisma } from '../../db/prisma'
+import { authenticated } from '../auth'
 
 /**
  * Файлы встречи. Тело запроса не парсится (`parse: 'none'`) и уходит на диск

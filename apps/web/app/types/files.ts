@@ -1,6 +1,6 @@
 /**
  * Контракт `/meetings/:id/files` на api — схема `fileResponse` в
- * `apps/api/src/modules/files.ts`.
+ * `apps/api/src/modules/files/index.ts`.
  *
  * `createdAt` — строка ISO-8601 в UTC с миллисекундами, как и даты у `/meetings`.
  * Пути на диске здесь нет намеренно: он внутреннее дело api.

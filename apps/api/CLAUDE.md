@@ -71,7 +71,9 @@ src/config/env.ts   всё чтение окружения
   навешивай на инстанс где-то ещё.
 
 Новый домен — это новый файл в `src/modules/`, экспортирующий инстанс Elysia с
-`prefix` и `tags`, и одна строка `.use(...)` в `app.ts`.
+`prefix` и `tags`, и одна строка `.use(...)` в `app.ts`. Домен, которому тесно в
+одном файле, становится каталогом: роуты в `index.ts`, остальное рядом
+(`src/modules/files/` — образец), а импорт в `app.ts` не меняется.
 
 ## Данные: Prisma 7
 
@@ -186,7 +188,7 @@ src/db/prisma.ts           единственный инстанс PrismaClient
 
 ### Файлы встречи
 
-`src/modules/files.ts`, два маршрута: приём файла и список. Отдача, удаление и
+`src/modules/files/index.ts`, два маршрута: приём файла и список. Отдача, удаление и
 лимиты — фазы 2–4 плана, их ещё нет: сейчас api принимает любой формат и любой
 размер. Перед правкой — ресерч, см. раздел выше.
 
@@ -306,15 +308,15 @@ Elysia отдать такой ответ из guard'а.
 `http://localhost:5173`, то есть dev-сервер Nuxt; он должен совпадать с
 `devServer.port` во фронтенде.
 
-| Переменная              | Дефолт                  | Кто читает                                   |
-| ----------------------- | ----------------------- | -------------------------------------------- |
-| `PORT`, `HOST`          | `3000`, `0.0.0.0`       | `src/index.ts`                               |
-| `CORS_ORIGINS`          | `http://localhost:5173` | `app.ts` через `env.corsOrigins`             |
-| `DATABASE_URL`          | нет                     | `src/db/prisma.ts` и Prisma CLI              |
-| `JWT_SECRET`            | нет                     | `src/modules/auth.ts`                        |
-| `JWT_EXPIRES_IN`        | `7d`                    | там же, формат jose: `15m`, `7d`             |
-| `UPLOAD_DIR`            | `./.uploads`            | `src/modules/files.ts` через `env.uploadDir` |
-| `MAX_REQUEST_BODY_SIZE` | 2 ГиБ + 64 МБ           | `src/index.ts` → `app.listen`                |
+| Переменная              | Дефолт                  | Кто читает                                         |
+| ----------------------- | ----------------------- | -------------------------------------------------- |
+| `PORT`, `HOST`          | `3000`, `0.0.0.0`       | `src/index.ts`                                     |
+| `CORS_ORIGINS`          | `http://localhost:5173` | `app.ts` через `env.corsOrigins`                   |
+| `DATABASE_URL`          | нет                     | `src/db/prisma.ts` и Prisma CLI                    |
+| `JWT_SECRET`            | нет                     | `src/modules/auth.ts`                              |
+| `JWT_EXPIRES_IN`        | `7d`                    | там же, формат jose: `15m`, `7d`                   |
+| `UPLOAD_DIR`            | `./.uploads`            | `src/modules/files/index.ts` через `env.uploadDir` |
+| `MAX_REQUEST_BODY_SIZE` | 2 ГиБ + 64 МБ           | `src/index.ts` → `app.listen`                      |
 
 **У `DATABASE_URL` и `JWT_SECRET` дефолта нет намеренно.** `env.ts` бросает
 исключение на старте, если их не задали. Дефолт у секрета подписи — это дыра,

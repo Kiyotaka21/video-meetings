@@ -236,7 +236,7 @@ percent-encoding.** `POST /meetings/:id/files` не парсит тело (`mult
 него не помещается ни на клиенте (`setRequestHeader` бросает `TypeError`), ни на
 сервере (`new Headers` бросает там же). Контракт — `encodeURIComponent` в
 `apps/web/app/composables/useMeetingFiles.ts` и `decodeURIComponent` в
-`apps/api/src/modules/files.ts`; снимешь одну половину — имена файлов приедут
+`apps/api/src/modules/files/index.ts`; снимешь одну половину — имена файлов приедут
 битыми, и ни типы, ни сборка этого не заметят. То же и с полями ответа: тип
 `MeetingFile` в `apps/web/app/types/files.ts` повторяет схему `fileResponse` на
 api, а зафиксирован контракт в `apps/api/tests/files.e2e.test.ts`.
