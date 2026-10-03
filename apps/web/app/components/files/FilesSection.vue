@@ -12,6 +12,8 @@ interface Props {
   failure?: string | null
   /** Файл, который сейчас уезжает на api, или `null`. */
   upload?: ActiveUpload | null
+  /** Id файла, который сейчас удаляется. */
+  deletingId?: string | null
 }
 
 interface Emits {
@@ -19,6 +21,8 @@ interface Emits {
   select: [file: File, ignored: number]
   cancel: []
   retry: []
+  delete: [file: MeetingFile]
+  linkExpired: []
 }
 
 const props = defineProps<Props>()
@@ -29,13 +33,29 @@ const FILE_FORMS = { one: 'файл', few: 'файла', many: 'файлов' }
 const countLabel = computed(() => plural(props.files.length, FILE_FORMS))
 
 const isFull = computed(() => props.files.length >= MAX_FILES_PER_MEETING)
+
+const heading = useTemplateRef<HTMLHeadingElement>('heading')
+
+/**
+ * Куда вернуть фокус после удаления: строка вместе с её кнопкой исчезает, и без
+ * этого фокус улетает в `body`, а Tab начинает обход страницы с начала.
+ */
+const focusHeading = () => heading.value?.focus()
+
+defineExpose({ focusHeading })
 </script>
 
 <template>
   <section class="flex flex-col gap-4">
     <div class="flex items-center gap-3">
       <UIcon name="i-lucide-paperclip" class="size-5 shrink-0 text-primary" />
-      <h2 class="text-xl font-semibold tracking-tight text-highlighted">Файлы</h2>
+      <h2
+        ref="heading"
+        tabindex="-1"
+        class="text-xl font-semibold tracking-tight text-highlighted focus:outline-none"
+      >
+        Файлы
+      </h2>
       <UBadge v-if="!props.pending" color="neutral" variant="subtle" :label="countLabel" />
     </div>
 
@@ -87,7 +107,14 @@ const isFull = computed(() => props.files.length >= MAX_FILES_PER_MEETING)
         <!-- divide-y вместо рамки у каждой строки: между соседями одна линия,
              а по краям её даёт сама карточка. -->
         <ul class="divide-y divide-default">
-          <FilesFileItem v-for="file in props.files" :key="file.id" :file="file" />
+          <FilesFileItem
+            v-for="file in props.files"
+            :key="file.id"
+            :file="file"
+            :deleting="props.deletingId === file.id"
+            @delete="emit('delete', $event)"
+            @link-expired="emit('linkExpired')"
+          />
         </ul>
       </UCard>
 
