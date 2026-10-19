@@ -1,0 +1,8 @@
+{
+  "milestone": "Профиль. Фаза 1: Имя от формы профиля до карточки на `/`",
+  "active": true,
+  "maxIterations": 1,
+  "maxTurns": 50,
+  "branch": "feature/phase-1",
+  "prompt": "Прочитай .claude/ralph.md и следуй правилам оттуда. Возьми следующую открытую issue из milestone '{milestone}' и реализуй ее в '{branch}'"
+}
