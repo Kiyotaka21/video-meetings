@@ -170,15 +170,17 @@ claude mcp add --transport http nuxt-ui https://ui.nuxt.com/mcp
 | `/register`       | `prerender: true`             | то же                                               |
 | `/blog/**`        | `isr: 3600`                   | кэш на час, страниц пока нет                        |
 | `/meetings/**`    | `ssr: false` + `X-Robots-Tag` | страница встречи: файлы владельца, тот же кабинет   |
+| `/profile`        | `ssr: false` + `X-Robots-Tag` | профиль вошедшего: его имя, тот же кабинет          |
 | `/room/**`        | `ssr: false`                  | WebRTC и `getUserMedia` требуют браузера            |
 | `/app`, `/app/**` | `redirect: '/'`               | кабинет переехал на `/`, старые ссылки не 404       |
 
 **У корня больше нет публичной страницы.** `/` — это кабинет: раньше там лежал
 пререндеренный лендинг, теперь маршрут закрыт middleware `auth` и отдаётся
 клиентской оболочкой. Индексируемых страниц осталось три: `/pricing`, `/login`,
-`/register`. `/meetings/**` — такой же приватный маршрут, как `/`, и правило у
-него то же самое: `ssr: false` плюс `X-Robots-Tag`. Если понадобится публичная витрина — это новый маршрут с
-`prerender: true`, а не возврат содержимого на `/`.
+`/register`. `/meetings/**` и `/profile` — такие же приватные маршруты, как `/`,
+и правило у них то же самое: `ssr: false` плюс `X-Robots-Tag`. Если понадобится
+публичная витрина — это новый маршрут с `prerender: true`, а не возврат
+содержимого на `/`.
 
 **`noindex` для `/` навешен заголовком `X-Robots-Tag` в `routeRules`, а не строкой
 в `robots.txt`.** `Disallow: /` закрыл бы вместе с корнем и все публичные
@@ -200,9 +202,10 @@ claude mcp add --transport http nuxt-ui https://ui.nuxt.com/mcp
 ls apps/web/.output/public      # ожидаем pricing/, login/ и register/
 ```
 
-`/`, `/room/**` и `/app/**` в `.output/public` попадать не должны — они отдаются
-клиентской оболочкой. Быстрая проверка на запущенном сервере: у `/pricing` в HTML
-есть `<h1>`, у `/` и `/room/abc` — нет.
+`/`, `/meetings/**`, `/profile`, `/room/**` и `/app/**` в `.output/public`
+попадать не должны — они отдаются клиентской оболочкой. Быстрая проверка на
+запущенном сервере: у `/pricing` в HTML есть `<h1>`, у `/`, `/profile` и
+`/room/abc` — нет.
 
 ## Метаданные
 
@@ -254,6 +257,7 @@ bun run --filter @video-meetings/web postinstall
 | `app/pages/login.vue`                      | вызов `login()`, тост, редирект на `/`, состояние отправки                                                                  |
 | `app/pages/register.vue`                   | то же для `register()`                                                                                                      |
 | `app/pages/index.vue`                      | кабинет: загрузка, разбор 401, выход, разбивка встреч по блокам                                                             |
+| `app/pages/profile.vue`                    | профиль: загрузка `/auth/me`, алерт с «Повторить», разбор 401                                                               |
 | `app/components/auth/CredentialsForm.vue`  | одна форма на вход и регистрацию: state, валидация, ошибки, фокус                                                           |
 | `app/components/auth/RegisterAside.vue`    | левая колонка на `/register`, без логики                                                                                    |
 | `app/components/dashboard/AccountCard.vue` | адрес вошедшего и кнопка «Выйти»                                                                                            |
@@ -264,6 +268,7 @@ bun run --filter @video-meetings/web postinstall
 | `app/utils/api.ts`                         | `statusOf`, `isUnauthorized`, текст «нет связи»                                                                             |
 | `app/utils/auth.ts`                        | границы полей и разбор отказов `/auth/*`                                                                                    |
 | `app/utils/meetings.ts`                    | разбивка на блоки, формат даты, множественные формы                                                                         |
+| `app/utils/profile.ts`                     | разбор отказов на странице профиля                                                                                          |
 
 Неочевидности:
 

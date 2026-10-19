@@ -62,7 +62,7 @@ PRD оставлял открытым способ отдачи аватара �
 - [x] Тесты в `tests/auth.e2e.test.ts`: `"  Анна Петрова  "` сохраняется как
       «Анна Петрова» и приходит в `/auth/me`; `""` и `"   "` дают `null`; 51
       символ и `"Анна\nПетрова"` — 422, имя прежнее; без токена и с негодным — 401. Тест на форму ответа `/auth/me` дополняется полем `name`.
-- [ ] Страница `app/pages/profile.vue` с middleware `auth` и правило `routeRules`
+- [x] Страница `app/pages/profile.vue` с middleware `auth` и правило `routeRules`
       для `/profile` (`ssr: false` плюс `X-Robots-Tag`, `useSeoMeta` с
       `noindex`); в том же коммите — строка в таблице маршрутов
       `apps/web/CLAUDE.md` и в «Рендеринг во фронтенде» `README.md`. Загрузка

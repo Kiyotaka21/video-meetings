@@ -167,6 +167,7 @@ Nuxt настроен на гибридный рендеринг — `routeRules
 | `/register`       | `prerender: true`             | То же для регистрации                              |
 | `/blog/**`        | `isr: 3600`                   | Кэш на час, страниц пока нет                       |
 | `/meetings/**`    | `ssr: false` + `X-Robots-Tag` | Страница встречи с файлами владельца               |
+| `/profile`        | `ssr: false` + `X-Robots-Tag` | Профиль вошедшего пользователя                     |
 | `/room/**`        | `ssr: false`                  | WebRTC и `getUserMedia` требуют реального браузера |
 | `/app`, `/app/**` | `redirect: '/'`               | Кабинет переехал на `/`, старые ссылки не 404      |
 
@@ -180,7 +181,7 @@ ls apps/web/.output/public          # pricing/, login/ и register/
 grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 ```
 
-`/`, `/meetings/**`, `/room/**` и `/app/**` в `.output/public` не попадают — это
+`/`, `/meetings/**`, `/profile`, `/room/**` и `/app/**` в `.output/public` не попадают — это
 ожидаемо, они отдаются клиентской оболочкой.
 
 ## Структура
