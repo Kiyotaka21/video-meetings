@@ -77,6 +77,21 @@ const invalidCredentials: Array<[string, unknown]> = [
   ['e-mail не строка', { email: 42, password: PASSWORD }],
 ]
 
+/**
+ * Токены, которые обязан отбить guard. Набор один на GET и PATCH `/auth/me`:
+ * без проверки `sub` в guard'е токен без него дошёл бы до `update` с
+ * `id: undefined` и вместо 401 получил бы 500.
+ */
+const rejectedTokens: Array<[string, string]> = [
+  ['мусор вместо токена', 'not-a-jwt-at-all'],
+  [
+    'подпись чужим секретом',
+    signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
+  ],
+  ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
+  ['подпись нашим секретом, но без sub', signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
+]
+
 describe('POST /auth/register', () => {
   it('создаёт пользователя и возвращает JWT', async () => {
     const email = uniqueEmail()
@@ -290,16 +305,6 @@ describe('GET /auth/me', () => {
     expect(response.body).not.toHaveProperty('email')
   })
 
-  const rejectedTokens: Array<[string, string]> = [
-    ['мусор вместо токена', 'not-a-jwt-at-all'],
-    [
-      'подпись чужим секретом',
-      signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
-    ],
-    ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
-    ['подпись нашим секретом, но без sub', signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
-  ]
-
   for (const [name, token] of rejectedTokens) {
     it(`отклоняет: ${name}`, async () => {
       const response = await getJson(ME, token)
@@ -418,8 +423,8 @@ describe('PATCH /auth/me', () => {
     ['нулевой символ', { name: 'Анна\u0000' }],
     ['DEL', { name: 'Анна\u007F' }],
     ['C1-управляющий', { name: 'Анна\u0085Петрова' }],
-    ['разделитель строк U+2028', { name: 'Анна Петрова' }],
-    ['разделитель абзацев U+2029', { name: 'Анна Петрова' }],
+    ['разделитель строк U+2028', { name: 'Анна\u2028Петрова' }],
+    ['разделитель абзацев U+2029', { name: 'Анна\u2029Петрова' }],
     ['имя не строка', { name: 42 }],
     ['без поля name', {}],
   ]
@@ -441,15 +446,6 @@ describe('PATCH /auth/me', () => {
     expect(response.status).toBe(401)
     expect(response.body).not.toHaveProperty('name')
   })
-
-  const rejectedTokens: Array<[string, string]> = [
-    ['мусор вместо токена', 'not-a-jwt-at-all'],
-    [
-      'подпись чужим секретом',
-      signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
-    ],
-    ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
-  ]
 
   for (const [name, token] of rejectedTokens) {
     it(`отклоняет: ${name} → 401`, async () => {
