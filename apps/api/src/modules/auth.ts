@@ -9,9 +9,41 @@ const credentials = t.Object({
   password: t.String({ minLength: 8, maxLength: 128 }),
 })
 
+/** Граница имени — после обрезки пробелов по краям, а не по сырой строке. */
+const NAME_MAX_LENGTH = 50
+
+// Перевод строки и прочие управляющие (Cc), плюс разделители строк и абзацев:
+// в имени они не нужны ни внутри, ни по краям.
+const CONTROL = '\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029'
+// Что срезает `trim()` за вычетом управляющих: пробелы Zs и BOM.
+const SPACE = '\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF'
+const VISIBLE = `[^${SPACE}${CONTROL}]`
+
+/**
+ * Схема видит сырую строку, а длина считается после `trim()`, поэтому граница
+ * зашита в шаблон: пробелы, затем до 50 символов, которые начинаются и кончаются
+ * не пробелом, затем снова пробелы. Так отказ остаётся обычным 422 валидатора,
+ * а не второй веткой в обработчике со своим телом ответа.
+ *
+ * Хвостовые пробелы стоят внутри необязательной группы намеренно: в форме
+ * `^\s*(…)?\s*$` строка из одних пробелов перед чужим символом даёт квадратичный
+ * перебор, а так — линейный. Замер на Bun 1.3.14: 40 000 пробелов и перевод
+ * строки — 2 с против 0 мс, а тело JSON api читает любого размера.
+ */
+const NAME_PATTERN = `^[${SPACE}]*(?:${VISIBLE}(?:[^${CONTROL}]{0,${NAME_MAX_LENGTH - 2}}${VISIBLE})?[${SPACE}]*)?$`
+
+const nameUpdate = t.Object({ name: t.String({ pattern: NAME_PATTERN }) })
+
 const tokenResponse = t.Object({ token: t.String() })
 const messageResponse = t.Object({ message: t.String() })
-const userResponse = t.Object({ id: t.String(), email: t.String() })
+const userResponse = t.Object({
+  id: t.String(),
+  email: t.String(),
+  name: t.Nullable(t.String()),
+})
+
+/** Поля пользователя, которые уходят наружу, — одни и те же у GET и PATCH. */
+const publicUser = { id: true, email: true, name: true } as const
 
 const security = [{ bearerAuth: [] }]
 
@@ -36,6 +68,10 @@ const normalizeEmail = (email: string): string => email.trim().toLowerCase()
 /** P2002 — нарушение unique-индекса; здесь он один, по `email`. */
 const isUniqueViolation = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002'
+
+/** P2025 — строки для `update` нет: пользователя удалили, а токен ещё жив. */
+const isRecordNotFound = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025'
 
 /**
  * Один инстанс на всё приложение: и подписывает токены, и проверяет их. Elysia
@@ -71,38 +107,68 @@ export const authenticated = new Elysia({ name: 'authenticated' })
   })
 
 /**
- * `/auth/me` — единственный закрытый роут в этом модуле, поэтому он вынесен в
- * отдельный инстанс, а не дописан к `authModule` после `.use(authenticated)`.
+ * `/auth/me` — закрытые роуты этого модуля, поэтому они вынесены в отдельный
+ * инстанс, а не дописаны к `authModule` после `.use(authenticated)`.
  * Hook'и Elysia действуют на роуты, объявленные после них: при дописывании
  * порядок строк в файле начал бы решать, открыт `/auth/register` или закрыт.
  * Здесь граница видна глазами — под guard'ом ровно то, что внутри инстанса.
  */
-const currentUserRoutes = new Elysia({ name: 'auth.me' }).use(authenticated).get(
-  '/me',
-  async ({ userId, status }) => {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, email: true },
-    })
+const currentUserRoutes = new Elysia({ name: 'auth.me' })
+  .use(authenticated)
+  .get(
+    '/me',
+    async ({ userId, status }) => {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: publicUser })
 
-    // Подпись наша и `sub` на месте, но пользователя нет: учётку удалили либо
-    // токен выпущен против другой базы. Для клиента это та же мёртвая сессия,
-    // что и истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
-    // /login» покрывало все случаи одной веткой, без разбора 404.
-    if (!user) {
-      return status(401, { message: 'Unauthorized' })
-    }
+      // Подпись наша и `sub` на месте, но пользователя нет: учётку удалили либо
+      // токен выпущен против другой базы. Для клиента это та же мёртвая сессия,
+      // что и истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
+      // /login» покрывало все случаи одной веткой, без разбора 404.
+      if (!user) {
+        return status(401, { message: 'Unauthorized' })
+      }
 
-    return user
-  },
-  {
-    response: {
-      200: userResponse,
-      401: messageResponse,
+      return user
     },
-    detail: { summary: 'Get the current user', security },
-  },
-)
+    {
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Get the current user', security },
+    },
+  )
+  .patch(
+    '/me',
+    async ({ userId, body, status }) => {
+      // Шаблон уже отбил управляющие символы, так что `trim()` срезает только
+      // пробелы. Пустое после обрезки — сброс: в базе «нет имени» — это `null`.
+      const name = body.name.trim()
+
+      try {
+        return await prisma.user.update({
+          where: { id: userId },
+          data: { name: name === '' ? null : name },
+          select: publicUser,
+        })
+      } catch (error) {
+        // Та же мёртвая сессия, что и на GET: пользователя удалили, токен жив.
+        if (isRecordNotFound(error)) {
+          return status(401, { message: 'Unauthorized' })
+        }
+
+        throw error
+      }
+    },
+    {
+      body: nameUpdate,
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Update the name of the current user', security },
+    },
+  )
 
 export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .use(jwtPlugin)

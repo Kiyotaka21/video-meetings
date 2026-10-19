@@ -20,6 +20,8 @@ export interface TokenResponse {
 export interface AuthUser {
   id: string
   email: string
+  /** Уже обрезанное по краям; `null` — имя не задано, вместо него показывают адрес. */
+  name: string | null
 }
 
 /**

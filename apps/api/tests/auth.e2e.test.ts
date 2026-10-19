@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { describe, expect, it } from 'bun:test'
 
-import { getJson, postJson } from './helpers/http'
+import { getJson, patchJson, postJson } from './helpers/http'
 import { decodeJwt, signJwt } from './helpers/jwt'
 import { registerUser, uniqueEmail } from './helpers/users'
 import { TEST_JWT_SECRET } from './setup'
@@ -22,6 +22,8 @@ const PASSWORD = 'correct-horse-battery'
 
 /** Токен живёт ограниченное время; конкретный TTL контрактом не фиксируем. */
 const MAX_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+
+const secondsFromNow = (seconds: number): number => Math.floor(Date.now() / 1000) + seconds
 
 /**
  * Асимметричных матчеров (`expect.any`) здесь нет намеренно: `toMatchObject` в
@@ -228,12 +230,10 @@ describe('POST /auth/login', () => {
 })
 
 describe('GET /auth/me', () => {
-  const secondsFromNow = (seconds: number): number => Math.floor(Date.now() / 1000) + seconds
-
   /** Ровно эти поля и ничего больше: клиент не должен видеть служебных колонок. */
-  const ME_FIELDS = ['email', 'id']
+  const ME_FIELDS = ['email', 'id', 'name']
 
-  it('отдаёт id и e-mail владельца токена', async () => {
+  it('отдаёт id, e-mail и имя владельца токена', async () => {
     const user = await registerUser()
 
     const response = await getJson(ME, user.token)
@@ -241,11 +241,14 @@ describe('GET /auth/me', () => {
     expect(response.status).toBe(200)
     expect(Object.keys(response.body as object).sort()).toEqual(ME_FIELDS)
 
-    const { id, email } = response.body as { id: string; email: string }
+    const { id, email, name } = response.body as { id: string; email: string; name: unknown }
     expect(email).toBe(user.email)
     // id берётся из базы, а `sub` — из токена; расхождение означало бы, что
     // маршрут отвечает не про того пользователя, чей токен пришёл.
     expect(id).toBe(subjectOf(user.token))
+    // При регистрации имя не спрашивается. Поле при этом есть всегда: `null`
+    // значит «не задано», и клиенту не нужно отличать его от пропавшего ключа.
+    expect(name).toBeNull()
   })
 
   it('не отдаёт хеш пароля и служебные отметки', async () => {
@@ -316,5 +319,170 @@ describe('GET /auth/me', () => {
 
     expect(response.status).toBe(401)
     expect(response.body).not.toHaveProperty('email')
+  })
+})
+
+describe('PATCH /auth/me', () => {
+  const NAME = 'Анна Петрова'
+
+  /** Имя, каким его теперь видит `GET /auth/me`, — не то, что вернул сам PATCH. */
+  const storedNameOf = async (token: string): Promise<unknown> => {
+    const response = await getJson(ME, token)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toHaveProperty('name')
+
+    return (response.body as { name: unknown }).name
+  }
+
+  const nameIn = (body: unknown): unknown => (body as { name?: unknown }).name
+
+  /** Пользователь, у которого имя уже задано: отказ обязан оставить его прежним. */
+  const userNamed = async (name: string) => {
+    const user = await registerUser()
+    const response = await patchJson(ME, { name }, user.token)
+
+    expect(response.status).toBe(200)
+
+    return user
+  }
+
+  it('обрезает пробелы по краям: «  Анна Петрова  » сохраняется как «Анна Петрова»', async () => {
+    const user = await registerUser()
+
+    const response = await patchJson(ME, { name: `  ${NAME}  ` }, user.token)
+
+    expect(response.status).toBe(200)
+    expect(nameIn(response.body)).toBe(NAME)
+    expect(await storedNameOf(user.token)).toBe(NAME)
+  })
+
+  it('отвечает тем же объектом, что GET /auth/me', async () => {
+    // Фронтенд кладёт ответ в общий `user` без повторного запроса, поэтому
+    // поля и значения обязаны совпасть целиком, а не только имя.
+    const user = await registerUser()
+
+    const patched = await patchJson(ME, { name: NAME }, user.token)
+    const me = await getJson(ME, user.token)
+
+    expect(patched.status).toBe(200)
+    expect(patched.body).toEqual(me.body)
+  })
+
+  const resets: Array<[string, string]> = [
+    ['пустая строка', ''],
+    ['одни пробелы', '   '],
+  ]
+
+  for (const [label, name] of resets) {
+    it(`${label} сбрасывает имя в null`, async () => {
+      const user = await userNamed(NAME)
+
+      const response = await patchJson(ME, { name }, user.token)
+
+      expect(response.status).toBe(200)
+      expect(nameIn(response.body)).toBeNull()
+      expect(await storedNameOf(user.token)).toBeNull()
+    })
+  }
+
+  it('50 символов принимает, и пробелы по краям в границу не входят', async () => {
+    const name = 'я'.repeat(50)
+    const user = await registerUser()
+
+    const response = await patchJson(ME, { name: `  ${name}  ` }, user.token)
+
+    expect(response.status).toBe(200)
+    expect(nameIn(response.body)).toBe(name)
+  })
+
+  it('правит имя только владельцу токена', async () => {
+    const owner = await registerUser()
+    const neighbour = await registerUser()
+
+    const response = await patchJson(ME, { name: NAME }, owner.token)
+
+    expect(response.status).toBe(200)
+    expect(await storedNameOf(neighbour.token)).toBeNull()
+  })
+
+  /** Тела, которые обязан отбить валидатор, не трогая сохранённое имя. */
+  const rejectedBodies: Array<[string, unknown]> = [
+    ['51 символ', { name: 'я'.repeat(51) }],
+    ['51 символ даже с пробелами по краям', { name: ` ${'я'.repeat(51)} ` }],
+    ['перевод строки внутри', { name: 'Анна\nПетрова' }],
+    // `trim()` срезал бы его молча, но перевод строки не принимается нигде.
+    ['перевод строки по краю', { name: 'Анна\n' }],
+    ['возврат каретки', { name: 'Анна\rПетрова' }],
+    ['табуляция', { name: 'Анна\tПетрова' }],
+    ['нулевой символ', { name: 'Анна\u0000' }],
+    ['DEL', { name: 'Анна\u007F' }],
+    ['C1-управляющий', { name: 'Анна\u0085Петрова' }],
+    ['разделитель строк U+2028', { name: 'Анна Петрова' }],
+    ['разделитель абзацев U+2029', { name: 'Анна Петрова' }],
+    ['имя не строка', { name: 42 }],
+    ['без поля name', {}],
+  ]
+
+  for (const [label, payload] of rejectedBodies) {
+    it(`отклоняет: ${label} — 422, имя прежнее`, async () => {
+      const user = await userNamed(NAME)
+
+      const response = await patchJson(ME, payload, user.token)
+
+      expect(response.status).toBe(422)
+      expect(await storedNameOf(user.token)).toBe(NAME)
+    })
+  }
+
+  it('без заголовка Authorization → 401', async () => {
+    const response = await patchJson(ME, { name: NAME })
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('name')
+  })
+
+  const rejectedTokens: Array<[string, string]> = [
+    ['мусор вместо токена', 'not-a-jwt-at-all'],
+    [
+      'подпись чужим секретом',
+      signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
+    ],
+    ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
+  ]
+
+  for (const [name, token] of rejectedTokens) {
+    it(`отклоняет: ${name} → 401`, async () => {
+      const response = await patchJson(ME, { name: NAME }, token)
+
+      expect(response.status).toBe(401)
+      expect(response.body).not.toHaveProperty('name')
+    })
+  }
+
+  it('годная подпись, но такого пользователя нет → 401, а не 404 и не 500', async () => {
+    // `update` по несуществующей строке бросает P2025; наружу это та же
+    // мёртвая сессия, что и на GET /auth/me.
+    const token = signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, TEST_JWT_SECRET)
+
+    const response = await patchJson(ME, { name: NAME }, token)
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('name')
+  })
+
+  it('в спеке OpenAPI закрыт bearerAuth и описывает 401', async () => {
+    // Без `detail.security` в Scalar нет поля для токена и роут выглядит
+    // открытым; без 401 в `response`-карте guard не опишет свой отказ.
+    type Spec = {
+      paths: Record<string, Record<string, { security?: unknown; responses?: object }>>
+    }
+
+    const response = await getJson('/docs/json')
+    const operation = (response.body as Spec).paths[ME]?.patch
+
+    expect(response.status).toBe(200)
+    expect(operation?.security).toEqual([{ bearerAuth: [] }])
+    expect(Object.keys(operation?.responses ?? {})).toContain('401')
   })
 })

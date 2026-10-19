@@ -11,11 +11,16 @@ datasource db {
 }
 
 model User {
-  id           String   @id @default(uuid(7))
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id           String @id @default(uuid(7))
+  email        String @unique
+  passwordHash String @map("password_hash")
+
+  /// Имя для показа, уже обрезанное по краям. `null` — не задано: пустую строку
+  /// api сюда не пишет, и «нет имени» в базе выглядит одним способом.
+  name String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   meetings Meeting[]
 

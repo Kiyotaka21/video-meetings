@@ -97,7 +97,7 @@ docker compose down -v                                   # снести вмес
 
 | Таблица         | Что лежит                                                                                            |
 | --------------- | ---------------------------------------------------------------------------------------------------- |
-| `users`         | `id`, `email` (unique), `password_hash`, `created_at`, `updated_at`                                  |
+| `users`         | `id`, `email` (unique), `password_hash`, `name` (может быть `null`), `created_at`, `updated_at`      |
 | `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                   |
 | `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id` |
 
@@ -145,7 +145,7 @@ pre-commit-хук husky запускает: перед каждым коммит
 
 | Файл                       | Что фиксирует                                                                                    |
 | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT               |
+| `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT, правка имени |
 | `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат                              |
 | `files.e2e.test.ts`        | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
 | `file-content.e2e.test.ts` | отдача по ссылке: `Range` побайтово, `Content-Disposition`, кто открывает файл (401/404)         |
@@ -288,13 +288,21 @@ curl -X POST http://localhost:3000/auth/login \
 
 ```bash
 curl http://localhost:3000/auth/me -H "authorization: Bearer $TOKEN"
-# 200 {"id":"01a086d0-...","email":"user@example.com"}
+# 200 {"id":"01a086d0-...","email":"user@example.com","name":null}
+
+curl -X PATCH http://localhost:3000/auth/me \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"  Anna Petrova  "}'
+# 200 {"id":"01a086d0-...","email":"user@example.com","name":"Anna Petrova"}
 ```
 
 Адрес приходит из базы нормализованным (в нижнем регистре), а не в том виде, в
 каком его прислали при регистрации. Негодный токен — и токен с годной подписью, но
 удалённым пользователем — дают один и тот же `401`: для клиента это одинаково
 мёртвая сессия.
+
+Имя необязательно: пробелы по краям срезаются, пустая строка сбрасывает его в
+`null`, длиннее 50 символов или с переводом строки — `422`.
 
 Встречи — под авторизацией, токен из логина уходит в заголовок:
 
