@@ -92,7 +92,7 @@ PRD оставлял открытым способ отдачи аватара �
 
 **Задачи**:
 
-- [ ] Поле `tokenVersion Int @default(0)` (`token_version`) и миграция. Токены
+- [x] Поле `tokenVersion Int @default(0)` (`token_version`) и миграция. Токены
       `/auth/register` и `/auth/login` несут `ver`; guard `authenticated` и
       `/auth/me` читают строку пользователя по `sub` и сверяют `ver` (нет claim —
       0): расхождение или удалённый пользователь — 401.

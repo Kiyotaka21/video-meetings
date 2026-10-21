@@ -95,11 +95,11 @@ docker compose down -v                                   # снести вмес
 миграции в `apps/api/prisma/migrations/` (коммитятся), строка подключения — в
 `apps/api/.env`.
 
-| Таблица         | Что лежит                                                                                            |
-| --------------- | ---------------------------------------------------------------------------------------------------- |
-| `users`         | `id`, `email` (unique), `password_hash`, `name` (может быть `null`), `created_at`, `updated_at`      |
-| `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                   |
-| `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id` |
+| Таблица         | Что лежит                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `users`         | `id`, `email` (unique), `password_hash`, `name` (может быть `null`), `token_version` (версия сессий), отметки |
+| `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                            |
+| `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id`          |
 
 **Состояние теперь в двух местах.** В `meeting_files` лежат только метаданные;
 сам файл — на диске api, в каталоге из `UPLOAD_DIR` (по умолчанию
@@ -146,6 +146,7 @@ pre-commit-хук husky запускает: перед каждым коммит
 | Файл                       | Что фиксирует                                                                                    |
 | -------------------------- | ------------------------------------------------------------------------------------------------ |
 | `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT, правка имени |
+| `password.e2e.test.ts`     | отзыв сессий: guard сверяет `ver` токена с версией пользователя, токен без `ver` — версия 0      |
 | `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат                              |
 | `files.e2e.test.ts`        | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401 |
 | `file-content.e2e.test.ts` | отдача по ссылке: `Range` побайтово, `Content-Disposition`, кто открывает файл (401/404)         |

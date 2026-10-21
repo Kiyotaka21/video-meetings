@@ -84,6 +84,26 @@ const bearerToken = (header: string | undefined): string | undefined =>
   header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined
 
 /**
+ * Claims сессионного токена — одни у всех маршрутов, которые его выдают.
+ * `ver` — версия сессий пользователя: guard сравнивает её с `tokenVersion` в
+ * базе, и токен, выпущенный до смены пароля, перестаёт проходить.
+ */
+const sessionClaims = (user: { id: string; email: string; tokenVersion: number }) => ({
+  sub: user.id,
+  email: user.email,
+  ver: user.tokenVersion,
+})
+
+/**
+ * Версия, которой считается токен без `ver`: такие выпускались до появления
+ * счётчика. Она же — `@default` колонки, поэтому выкатка никого не
+ * разлогинивает, а первая смена пароля отзывает и их.
+ */
+const VERSION_BEFORE_COUNTER = 0
+
+const UNAUTHORIZED = { message: 'Unauthorized' } as const
+
+/**
  * Guard для маршрутов под авторизацией: `.use(authenticated)` — и в контексте
  * появляется `userId`, а запрос без годного токена до обработчика не доходит.
  *
@@ -100,7 +120,21 @@ export const authenticated = new Elysia({ name: 'authenticated' })
     // формат, истёкший exp. Токен без `sub` формально валиден, но пользователя
     // по нему не найти — для нас это тоже 401.
     if (payload === false || typeof payload.sub !== 'string') {
-      return status(401, { message: 'Unauthorized' })
+      return status(401, UNAUTHORIZED)
+    }
+
+    // Подпись говорит только, что токен выпустили мы, а не что сессия жива:
+    // пароль могли сменить, учётку — удалить. Это поход в базу на каждый
+    // закрытый запрос, поэтому — по первичному ключу и одна колонка.
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { tokenVersion: true },
+    })
+
+    // Строгое сравнение: `ver` выпускаем только мы и только числом, так что
+    // `"0"` — не версия 0, а чужой формат.
+    if (!user || (payload.ver ?? VERSION_BEFORE_COUNTER) !== user.tokenVersion) {
+      return status(401, UNAUTHORIZED)
     }
 
     return { userId: payload.sub }
@@ -120,12 +154,12 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
     async ({ userId, status }) => {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: publicUser })
 
-      // Подпись наша и `sub` на месте, но пользователя нет: учётку удалили либо
-      // токен выпущен против другой базы. Для клиента это та же мёртвая сессия,
-      // что и истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
+      // Токен удалённого пользователя отбил уже guard, но между его чтением и
+      // этим учётку могли удалить. Для клиента это та же мёртвая сессия, что и
+      // истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
       // /login» покрывало все случаи одной веткой, без разбора 404.
       if (!user) {
-        return status(401, { message: 'Unauthorized' })
+        return status(401, UNAUTHORIZED)
       }
 
       return user
@@ -154,7 +188,7 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
       } catch (error) {
         // Та же мёртвая сессия, что и на GET: пользователя удалили, токен жив.
         if (isRecordNotFound(error)) {
-          return status(401, { message: 'Unauthorized' })
+          return status(401, UNAUTHORIZED)
         }
 
         throw error
@@ -180,10 +214,10 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       try {
         const user = await prisma.user.create({
           data: { email, passwordHash: await Bun.password.hash(body.password) },
-          select: { id: true, email: true },
+          select: { id: true, email: true, tokenVersion: true },
         })
 
-        return status(201, { token: await jwt.sign({ sub: user.id, email: user.email }) })
+        return status(201, { token: await jwt.sign(sessionClaims(user)) })
       } catch (error) {
         // Проверять занятость отдельным SELECT'ом бессмысленно: между ним и
         // вставкой всё равно есть окно, а unique-индекс закрывает его сам.
@@ -217,7 +251,7 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
         return status(401, INVALID_CREDENTIALS)
       }
 
-      return { token: await jwt.sign({ sub: user.id, email: user.email }) }
+      return { token: await jwt.sign(sessionClaims(user)) }
     },
     {
       body: credentials,

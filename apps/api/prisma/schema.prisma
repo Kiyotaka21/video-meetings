@@ -19,6 +19,12 @@ model User {
   /// api сюда не пишет, и «нет имени» в базе выглядит одним способом.
   name String?
 
+  /// Версия сессий: токен несёт её в claim `ver`, guard сверяет на каждом
+  /// закрытом запросе. Смена пароля поднимает её на единицу — и все токены,
+  /// выпущенные раньше, перестают открывать api разом. Счётчик, а не время
+  /// смены: `iat` в JWT точен до секунды, и токен той же секунды не отличить.
+  tokenVersion Int @default(0) @map("token_version")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

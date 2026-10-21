@@ -59,6 +59,11 @@ const expectValidAuthToken = (token: string, email: string): void => {
   expect(payload.email).toBe(email)
   subjectOf(token)
 
+  // Версия сессий: её сверяет guard, а смена пароля поднимает. Сюда приходят
+  // только токены нового пользователя — у него версия 0, та же, которой guard
+  // считает токен без `ver`, выпущенный до появления счётчика.
+  expect(payload.ver).toBe(0)
+
   const nowSeconds = Math.floor(Date.now() / 1000)
   expect(typeof payload.exp).toBe('number')
   expect(Number(payload.exp)).toBeGreaterThan(nowSeconds)
