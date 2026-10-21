@@ -317,11 +317,16 @@ payload'а не зафиксирована ни одним тестом, а по
 
 **«Сессия кончилась» — это 401 от api, а не проверка на клиенте.** Route middleware
 `apps/web/app/middleware/auth.ts` смотрит только, есть ли кука: истёкший или
-отозванный токен он пропускает. Настоящий рубеж — 401, который отдают и guard
-`authenticated`, и `/auth/me` на удалённого пользователя; страница кабинета
-обрабатывает его одинаково (`isUnauthorized` в `apps/web/app/utils/api.ts`) — гасит
-сессию и уводит на `/login`. Если на api появится роут, который на негодный токен
-отвечает не 401, эта ветка его не поймает.
+отозванный токен он пропускает. Настоящий рубеж — 401 от guard'а `authenticated`:
+на истёкший или чужой токен, на удалённого пользователя и на токен, отозванный
+сменой пароля (guard сверяет claim `ver` с `tokenVersion` в базе). Страница
+кабинета обрабатывает его одинаково (`isUnauthorized` в
+`apps/web/app/utils/api.ts`) — гасит сессию и уводит на `/login`. Работает это в
+обе стороны: 401 на api — только мёртвая сессия. Отказ по содержимому формы под
+токеном отвечает другим кодом, даже если он про пароль: неверный текущий пароль у
+`POST /auth/me/password` — 403, иначе опечатка в поле выкидывала бы из системы.
+Появится роут, который на негодный токен отвечает не 401 или отдаёт 401 на
+что-то кроме негодного токена, — эта ветка сработает не так.
 
 **`.gitattributes` держит LF в рабочей копии** (`* text=auto eol=lf`). У Prettier
 `endOfLine: "lf"`, а git на Windows иначе конвертирует в CRLF — и `bun run check`
@@ -380,9 +385,9 @@ cmd //c mklink //J ".claude\\skills\\<имя>" ".agents\\skills\\<имя>"
 | Новый скилл агента                                                        | `.agents/skills/<имя>/SKILL.md` + ссылка в `.claude/skills/` — раздел «Скиллы коммитятся из `.agents/skills/`»                                                                                 |
 | Правка `.husky/pre-commit` или новый git-хук                              | раздел «Коммит проходит через husky» корневого `CLAUDE.md`                                                                                                                                     |
 | Новый MCP-сервер в `.mcp.json`                                            | раздел «Playwright MCP объявлен в `.mcp.json`» корневого `CLAUDE.md`, раздел «Тулинг» в `README.md`                                                                                            |
-| Правка схемы `credentials` или `JWT_EXPIRES_IN` на api                    | `apps/web/app/utils/auth.ts` и `useAuth.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                       |
+| Правка схем `credentials`, `password` или `JWT_EXPIRES_IN` на api         | `apps/web/app/utils/auth.ts` и `useAuth.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                       |
 | Правка схемы `nameUpdate` (`NAME_PATTERN`) на api                         | `validateName` в `apps/web/app/utils/profile.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                  |
-| Новый маршрут `/auth/*` или поле в его ответе                             | `apps/web/app/types/auth.ts`, `useAuth.ts`, тест в `apps/api/tests/auth.e2e.test.ts`, таблица маршрутов в `apps/api/CLAUDE.md`                                                                 |
+| Новый маршрут `/auth/*` или поле в его ответе                             | `apps/web/app/types/auth.ts`, `useAuth.ts`, тест в `apps/api/tests/auth.e2e.test.ts` (пароль — `password.e2e.test.ts`), таблица маршрутов в `apps/api/CLAUDE.md`                               |
 | Правка контракта загрузки файла (заголовки, поля ответа, форматы, лимиты) | `apps/web/app/types/files.ts`, `useMeetingFiles.ts` и копия лимитов в `apps/web/app/utils/files.ts`, тесты в `apps/api/tests/files*.e2e.test.ts`, разделы про файлы в обоих `apps/*/CLAUDE.md` |
 | Новый сервис или порт в `docker-compose.yml`                              | раздел «База данных» в `README.md`, «Postgres живёт в compose» здесь, корневой `.env.example`                                                                                                  |
 | Правка `prisma/schema.prisma`                                             | миграция в том же коммите (`bun run db:migrate`), раздел «База данных» в `README.md` при новой таблице                                                                                         |
