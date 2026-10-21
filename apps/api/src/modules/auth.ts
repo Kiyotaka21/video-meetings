@@ -4,6 +4,13 @@ import { Elysia, t } from 'elysia'
 import { env } from '../config/env'
 import { prisma } from '../db/prisma'
 import { avatarUrl } from './avatars'
+import {
+  AVATAR_INCOMPLETE,
+  AVATAR_TOO_LARGE,
+  AVATAR_UNSUPPORTED,
+  MAX_AVATAR_SIZE,
+} from './avatars/formats'
+import { receiveAvatar, removeAvatarFile } from './avatars/storage'
 
 /**
  * Границы пароля — одна схема на регистрацию, вход и смену пароля, а не три
@@ -82,6 +89,35 @@ const toPublicUser = ({ avatarKey, ...user }: PublicUserRow) => ({
   ...user,
   avatarUrl: avatarKey === null ? null : avatarUrl(avatarKey),
 })
+
+/**
+ * Ставит пользователю ключ аватара (`null` — убирает) и отдаёт прежний, чтобы
+ * обработчик удалил его файл после коммита. `null` вместо результата —
+ * пользователя уже нет.
+ *
+ * Прежний ключ читается под замком строки (`FOR UPDATE`): одной транзакции
+ * мало, в READ COMMITTED чтение ничего не блокирует. Без замка две замены
+ * подряд обе прочли бы один и тот же прежний ключ, вторая затёрла бы ключ
+ * первой — и файл первой остался бы на диске без строки навсегда. С замком
+ * вторая ждёт коммита первой и видит уже её ключ.
+ */
+const swapAvatarKey = (userId: string, avatarKey: string | null) =>
+  prisma.$transaction(async (tx) => {
+    const [locked] = await tx.$queryRaw<Array<{ avatar_key: string | null }>>`
+      SELECT avatar_key FROM users WHERE id = ${userId} FOR UPDATE`
+
+    if (!locked) {
+      return null
+    }
+
+    const user = await tx.user.update({
+      where: { id: userId },
+      data: { avatarKey },
+      select: publicUser,
+    })
+
+    return { user, previousKey: locked.avatar_key }
+  })
 
 const security = [{ bearerAuth: [] }]
 
@@ -308,6 +344,78 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
         403: messageResponse,
       },
       detail: { summary: 'Change the password and revoke all other sessions', security },
+    },
+  )
+  .put(
+    '/me/avatar',
+    async ({ userId, request, headers, status }) => {
+      // Основной рубеж — заявленный размер: браузер шлёт `Content-Length` у
+      // `Blob` всегда, и только отказ до чтения тела гарантированно доезжает до
+      // клиента. Заголовка нет или он не число — судит счётчик в `writeBody`.
+      if (Number(headers['content-length']) > MAX_AVATAR_SIZE) {
+        return status(413, { message: AVATAR_TOO_LARGE })
+      }
+
+      const received = await receiveAvatar(request.body, headers['content-length'])
+
+      if ('refused' in received) {
+        if (received.refused === 'too-large') {
+          return status(413, { message: AVATAR_TOO_LARGE })
+        }
+
+        if (received.refused === 'incomplete') {
+          return status(400, { message: AVATAR_INCOMPLETE })
+        }
+
+        return status(415, { message: AVATAR_UNSUPPORTED })
+      }
+
+      let swapped: Awaited<ReturnType<typeof swapAvatarKey>>
+
+      try {
+        swapped = await swapAvatarKey(userId, received.avatarKey)
+      } catch (error) {
+        await removeAvatarFile(received.avatarKey)
+
+        throw error
+      }
+
+      // Пользователя удалили между guard'ом и транзакцией: та же мёртвая
+      // сессия, а новый файл — уже ничей.
+      if (!swapped) {
+        await removeAvatarFile(received.avatarKey)
+
+        return status(401, UNAUTHORIZED)
+      }
+
+      // После коммита: до него строка ещё указывала на прежний файл. Файл без
+      // строки безвреден (отдача ищет строку раньше диска), строка без файла —
+      // битая картинка.
+      if (swapped.previousKey !== null) {
+        await removeAvatarFile(swapped.previousKey)
+      }
+
+      return toPublicUser(swapped.user)
+    },
+    {
+      // Тело не парсится: `request.body` остаётся нетронутым потоком, который
+      // `writeBody` сливает на диск. Multipart Elysia разобрал бы в память до
+      // обработчика, а потолок тела у Bun — 64 ГиБ.
+      parse: 'none',
+      response: {
+        200: userResponse,
+        400: messageResponse,
+        401: messageResponse,
+        413: messageResponse,
+        415: messageResponse,
+      },
+      detail: {
+        summary: 'Upload or replace the avatar of the current user',
+        description:
+          'Тело — сами байты JPEG, PNG или WebP до 2 МБ, без multipart. Формат ' +
+          'определяется по содержимому; `Content-Type` и имя файла не учитываются.',
+        security,
+      },
     },
   )
 
