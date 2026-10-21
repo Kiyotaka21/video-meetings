@@ -268,9 +268,11 @@ Prettier, TypeScript. `@nuxt/ui` и `tailwindcss` относятся к фрон
 **Контракт `/auth` продублирован на клиенте.** Формы входа и регистрации не
 спрашивают у api, какие данные он примет: границы адреса и пароля лежат в
 `apps/web/app/utils/auth.ts` и повторяют схему `credentials` из
-`apps/api/src/modules/auth.ts` — одну на оба маршрута. Разъезд не ловят ни типы, ни
-сборка — форма просто начинает отправлять заведомо отказные запросы или отбивать
-годные. То же со сроком сессии: `maxAge` куки `auth_token` в
+`apps/api/src/modules/auth.ts` — одну на оба маршрута. Так же форма имени на
+`/profile` повторяет шаблон `nameUpdate` у `PATCH /auth/me` (до 50 символов после
+обрезки, без управляющих) в `apps/web/app/utils/profile.ts`. Разъезд не ловят ни
+типы, ни сборка — форма просто начинает отправлять заведомо отказные запросы или
+отбивать годные. То же со сроком сессии: `maxAge` куки `auth_token` в
 `apps/web/app/composables/useAuth.ts` держится равным `JWT_EXPIRES_IN` из
 `apps/api/.env` (7 дней по умолчанию). Правишь схему или срок на api — правь и
 клиент; подробности в `apps/web/CLAUDE.md`.
@@ -377,6 +379,7 @@ cmd //c mklink //J ".claude\\skills\\<имя>" ".agents\\skills\\<имя>"
 | Правка `.husky/pre-commit` или новый git-хук                              | раздел «Коммит проходит через husky» корневого `CLAUDE.md`                                                                                                                                     |
 | Новый MCP-сервер в `.mcp.json`                                            | раздел «Playwright MCP объявлен в `.mcp.json`» корневого `CLAUDE.md`, раздел «Тулинг» в `README.md`                                                                                            |
 | Правка схемы `credentials` или `JWT_EXPIRES_IN` на api                    | `apps/web/app/utils/auth.ts` и `useAuth.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                       |
+| Правка схемы `nameUpdate` (`NAME_PATTERN`) на api                         | `validateName` в `apps/web/app/utils/profile.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                  |
 | Новый маршрут `/auth/*` или поле в его ответе                             | `apps/web/app/types/auth.ts`, `useAuth.ts`, тест в `apps/api/tests/auth.e2e.test.ts`, таблица маршрутов в `apps/api/CLAUDE.md`                                                                 |
 | Правка контракта загрузки файла (заголовки, поля ответа, форматы, лимиты) | `apps/web/app/types/files.ts`, `useMeetingFiles.ts` и копия лимитов в `apps/web/app/utils/files.ts`, тесты в `apps/api/tests/files*.e2e.test.ts`, разделы про файлы в обоих `apps/*/CLAUDE.md` |
 | Новый сервис или порт в `docker-compose.yml`                              | раздел «База данных» в `README.md`, «Postgres живёт в compose» здесь, корневой `.env.example`                                                                                                  |

@@ -76,6 +76,25 @@ export const useAuth = () => {
     return account
   }
 
+  /**
+   * `PATCH /auth/me` отвечает тем же объектом, что и `GET`, поэтому ответ сразу
+   * ложится в общий `user` — карточка на `/` покажет новое имя без повторного
+   * запроса. Строка уходит как набрана: обрезку пробелов и сброс пустого в
+   * `null` делает api, и в `user` попадает уже его результат.
+   */
+  const updateName = async (name: string): Promise<AuthUser> => {
+    const account = await $fetch<AuthUser>('/auth/me', {
+      baseURL: apiUrl,
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: { name },
+    })
+
+    user.value = account
+
+    return account
+  }
+
   /** Локальный выход: серверной сессии нет, JWT доживает свой `exp` сам. */
   const logout = async (): Promise<void> => {
     token.value = null
@@ -92,6 +111,7 @@ export const useAuth = () => {
     register,
     login,
     fetchUser,
+    updateName,
     logout,
   }
 }

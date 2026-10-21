@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { isUnauthorized } from '~/utils/api'
-import { describeProfileFailure } from '~/utils/profile'
+import { describeNameFailure, describeProfileFailure } from '~/utils/profile'
 
 // routeRules '/profile' -> ssr: false: страница за авторизацией, токен лежит в
 // куке и читается в браузере, индексировать здесь нечего.
@@ -8,11 +8,13 @@ definePageMeta({ middleware: 'auth' })
 
 useSeoMeta({ title: 'Профиль — Video Meetings', robots: 'noindex' })
 
-const { user, fetchUser, logout } = useAuth()
+const { user, fetchUser, updateName, logout } = useAuth()
 const toast = useToast()
 
 const isLoading = shallowRef(true)
 const failure = shallowRef<string | null>(null)
+const isSavingName = shallowRef(false)
+const nameFailure = shallowRef<string | null>(null)
 
 /**
  * Токен в куке есть, middleware пропустил, а api его не принял: истёк, выпущен
@@ -56,10 +58,54 @@ const load = async () => {
 }
 
 onMounted(load)
+
+/**
+ * Любой отказ, кроме 401, уходит текстом под поле, а не в алерт над формой:
+ * поле в блоке одно, так что «не сохранилось» — всегда про него, а готовая
+ * строка `help` под ним не даёт тексту сдвинуть вёрстку.
+ */
+const onSaveName = async (name: string) => {
+  isSavingName.value = true
+  nameFailure.value = null
+
+  try {
+    const saved = await updateName(name)
+
+    // Самого имени в тосте нет: что сохранилось, показывает поле, а 50 букв
+    // без пробела вылезали из тоста на 360px (замер).
+    toast.add({
+      title: saved.name ? 'Имя сохранено' : 'Имя сброшено',
+      description: saved.name
+        ? 'В кабинете оно видно над адресом почты.'
+        : 'В кабинете снова виден адрес почты.',
+      color: 'success',
+      icon: 'i-lucide-circle-check',
+    })
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      await endSession()
+
+      return
+    }
+
+    nameFailure.value = describeNameFailure(error)
+  } finally {
+    isSavingName.value = false
+  }
+}
 </script>
 
 <template>
   <div class="flex flex-col gap-8">
+    <UButton
+      to="/"
+      color="neutral"
+      variant="link"
+      icon="i-lucide-arrow-left"
+      label="Все встречи"
+      class="-mx-2.5 self-start"
+    />
+
     <div class="flex flex-col gap-2">
       <h1 class="text-3xl font-semibold tracking-tight text-highlighted">Профиль</h1>
       <p class="text-muted">Как вас видно в кабинете.</p>
@@ -85,20 +131,32 @@ onMounted(load)
       <UCard>
         <!-- Одно объявление о загрузке; сами `USkeleton` уходят под
              `aria-hidden`: каждый рендерит свой `role="alert"` с английским
-             «loading». -->
+             «loading». Высоты — по строкам готовой формы: пояснение, подпись,
+             поле, подсказка, кнопка. -->
         <template v-if="isLoading">
           <span role="status" class="sr-only">Загружаем профиль</span>
-          <div aria-hidden="true">
-            <USkeleton class="h-6 w-64 max-w-full" />
+          <div aria-hidden="true" class="flex flex-col items-start gap-5">
+            <USkeleton class="h-5 w-80 max-w-full" />
+            <div class="flex w-full flex-col gap-1">
+              <USkeleton class="h-5 w-12" />
+              <USkeleton class="h-9 w-full sm:max-w-md" />
+              <USkeleton class="mt-1 h-5 w-64 max-w-full" />
+            </div>
+            <USkeleton class="h-9 w-28" />
           </div>
         </template>
 
-        <p v-else-if="user?.name" class="wrap-anywhere text-highlighted">{{ user.name }}</p>
+        <div v-else-if="user" class="flex flex-col gap-5">
+          <!-- В одну строку и на 360px: заглушка при загрузке — тоже одна. -->
+          <p class="text-sm text-muted">В кабинете — крупно, над адресом почты.</p>
 
-        <p v-else-if="user" class="text-muted">
-          Имя не задано — в кабинете виден адрес
-          <span class="break-all text-highlighted">{{ user.email }}</span>
-        </p>
+          <ProfileNameForm
+            :name="user.name"
+            :loading="isSavingName"
+            :failure="nameFailure"
+            @submit="onSaveName"
+          />
+        </div>
       </UCard>
     </section>
   </div>
