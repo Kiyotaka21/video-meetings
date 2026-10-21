@@ -178,7 +178,7 @@ PRD оставлял открытым способ отдачи аватара �
       свой инстанс без guard'а: ключ ищется в базе (нет строки — 404, даже если
       файл на диске), `Content-Type` — по формату, `nosniff`,
       `Cache-Control: public, max-age=31536000, immutable`.
-- [ ] Тесты `tests/avatar.e2e.test.ts`: JPEG, PNG и WebP — `avatarUrl` в
+- [x] Тесты `tests/avatar.e2e.test.ts`: JPEG, PNG и WebP — `avatarUrl` в
       `/auth/me`, байты и `Content-Type` по ссылке совпадают; 2 МБ + 1 байт —
       413 и по заголовку, и по факту, в `avatars/` ничего не осталось; GIF, SVG,
       HEIC и `.png` с текстом внутри — 415. Замена — файла старого ключа нет,

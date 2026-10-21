@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -26,11 +26,12 @@ import {
   uploadAvatar,
 } from './helpers/avatars'
 import { messageOf } from './helpers/files'
-import { deleteJson, getJson, requestRaw } from './helpers/http'
+import { deleteJson, getJson, postJson, requestRaw } from './helpers/http'
 import { gif, heic, jpeg, padded, paddedStream, png, svg, text, wav, webp } from './helpers/images'
-import { decodeJwt } from './helpers/jwt'
+import { decodeJwt, signJwt } from './helpers/jwt'
 import { waitForLockWaiter } from './helpers/locks'
-import { registerUser } from './helpers/users'
+import { registerUser, TEST_PASSWORD } from './helpers/users'
+import { TEST_JWT_SECRET } from './setup'
 
 /**
  * Аватар, e2e через `app.handle`. Загрузка — под токеном, сырым телом, как у
@@ -45,6 +46,8 @@ const FORMATS: Array<[string, () => Uint8Array, string]> = [
 ]
 
 const userIdOf = (token: string): string => String(decodeJwt(token).payload.sub)
+
+const secondsFromNow = (seconds: number): number => Math.floor(Date.now() / 1000) + seconds
 
 describe('Авторизация на /auth/me/avatar', () => {
   it('PUT без заголовка Authorization → 401, на диске ничего', async () => {
@@ -78,6 +81,56 @@ describe('Авторизация на /auth/me/avatar', () => {
 
     expect(response.status).toBe(401)
     expect(await currentAvatarUrl(user.token)).toBe(avatar)
+  })
+
+  /**
+   * Токены, которые обязан отбить guard. Тело PUT до записи не доходит —
+   * на диске после отказа ничего, — а DELETE не трогает чужой аватар.
+   */
+  const rejectedTokens: Array<[string, () => string]> = [
+    [
+      'подпись чужим секретом',
+      () => signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'another-secret'),
+    ],
+    ['истёкший', () => signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
+    ['без sub', () => signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
+    [
+      'годная подпись, а пользователя нет',
+      () => signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, TEST_JWT_SECRET),
+    ],
+  ]
+
+  for (const [name, token] of rejectedTokens) {
+    it(`PUT и DELETE отклоняют токен: ${name} → 401, на диске ничего`, async () => {
+      const before = storedAvatars()
+
+      const put = await putAvatar(imageUpload(png()), token())
+      const removed = await deleteJson(AVATAR_PATH, token())
+
+      expect(put.status).toBe(401)
+      expect(removed.status).toBe(401)
+      expect(storedAvatars()).toEqual(before)
+    })
+  }
+
+  it('токен, выпущенный до смены пароля, — 401 на PUT и DELETE, аватар прежний', async () => {
+    // Guard сверяет версию сессий: загрузка и удаление аватара — такие же
+    // закрытые маршруты, как `/auth/me` и `/meetings`.
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+
+    const changed = await postJson(
+      '/auth/me/password',
+      { currentPassword: TEST_PASSWORD, newPassword: 'staple-battery-horse' },
+      user.token,
+    )
+    const fresh = (changed.body as { token: string }).token
+
+    expect(changed.status).toBe(200)
+    expect((await putAvatar(imageUpload(jpeg()), user.token)).status).toBe(401)
+    expect((await deleteJson(AVATAR_PATH, user.token)).status).toBe(401)
+    expect(await currentAvatarUrl(fresh)).toBe(avatar)
+    expect(existsSync(avatarFileOf(avatar))).toBe(true)
   })
 
   for (const method of ['put', 'delete'] as const) {
@@ -398,6 +451,41 @@ describe('Замена под замком строки пользователя
     expect(await currentAvatarUrl(user.token)).toBe(ours)
     expect(existsSync(avatarFileOf(ours))).toBe(true)
     expect(existsSync(join(AVATARS_DIR, neighbourKey))).toBe(false)
+  })
+
+  /**
+   * Тот же приём для окна между guard'ом и транзакцией: guard пользователя
+   * уже нашёл, файл уже лёг под новым ключом, а строку удаляют, пока загрузка
+   * ждёт замка. Для клиента это мёртвая сессия — 401, — а файл без строки
+   * обработчик обязан убрать сам: больше его не подберёт никто.
+   */
+  it('пользователя удалили, пока загрузка ждала замка: 401, нового файла на диске нет', async () => {
+    const user = await registerUser()
+    const userId = userIdOf(user.token)
+    const before = storedAvatars()
+
+    const { promise: lockTaken, resolve: takeLock } = Promise.withResolvers<void>()
+    const { promise: released, resolve: release } = Promise.withResolvers<void>()
+
+    const neighbour = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`
+      await tx.user.delete({ where: { id: userId } })
+      takeLock()
+      await released
+    })
+
+    await lockTaken
+
+    const upload = putAvatar(imageUpload(png()), user.token)
+
+    await waitForLockWaiter()
+    release()
+    await neighbour
+
+    const response = await upload
+
+    expect(response.status).toBe(401)
+    expect(storedAvatars()).toEqual(before)
   })
 })
 
