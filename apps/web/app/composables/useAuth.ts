@@ -1,4 +1,4 @@
-import type { AuthUser, Credentials, TokenResponse } from '~/types/auth'
+import type { AuthUser, Credentials, PasswordChange, TokenResponse } from '~/types/auth'
 
 /**
  * Токен лежит в куке, а не в `localStorage`: `useCookie` читается и на сервере,
@@ -95,6 +95,27 @@ export const useAuth = () => {
     return account
   }
 
+  /**
+   * Смена пароля отзывает на api все токены пользователя, выпущенные раньше, —
+   * и тот, с которым ушёл этот запрос. Поэтому токен из ответа сразу ложится в
+   * куку с тем же `maxAge`, что при входе: без этого вкладка, сменившая пароль,
+   * вышла бы из системы вместе со всеми, а соседние вкладки этого браузера
+   * подхватят новый токен из общей куки.
+   *
+   * Ошибки не глотает: 403 и 400 вызывающий раскладывает через
+   * `describePasswordChangeFailure`, 401 — конец сессии.
+   */
+  const changePassword = async (change: PasswordChange): Promise<void> => {
+    const { token: issued } = await $fetch<TokenResponse>('/auth/me/password', {
+      baseURL: apiUrl,
+      method: 'POST',
+      headers: authHeaders(),
+      body: change,
+    })
+
+    token.value = issued
+  }
+
   /** Локальный выход: серверной сессии нет, JWT доживает свой `exp` сам. */
   const logout = async (): Promise<void> => {
     token.value = null
@@ -112,6 +133,7 @@ export const useAuth = () => {
     login,
     fetchUser,
     updateName,
+    changePassword,
     logout,
   }
 }

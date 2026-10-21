@@ -115,7 +115,7 @@ const onSubmit = () => {
     <UFormField
       name="name"
       label="Имя"
-      :help="`До ${NAME_MAX_LENGTH} символов. Пустое поле — без имени.`"
+      :help="`До ${NAME_MAX_LENGTH} символов. Пустое — без имени.`"
       :error="props.failure ?? undefined"
       class="w-full"
     >

@@ -47,3 +47,13 @@ export interface AuthFailure {
   field?: keyof Credentials
   message: string
 }
+
+/**
+ * Отказ смены пароля: с `field` текст уезжает под своё поле (403 — текущий
+ * пароль, 400 — новый), без него — про запрос целиком, его страница показывает
+ * тостом.
+ */
+export interface PasswordChangeFailure {
+  field?: keyof PasswordChange
+  message: string
+}
