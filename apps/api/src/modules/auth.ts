@@ -418,6 +418,34 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
       },
     },
   )
+  .delete(
+    '/me/avatar',
+    async ({ userId, status }) => {
+      // Сначала строка, потом диск, как у файлов встречи: файл без строки
+      // безвреден — отдача ищет строку раньше диска, и старый адрес отвечает
+      // 404 сразу после коммита, — а строка без файла дала бы битую картинку.
+      const swapped = await swapAvatarKey(userId, null)
+
+      if (!swapped) {
+        return status(401, UNAUTHORIZED)
+      }
+
+      // Аватара не было — удалять нечего, и это не ошибка: второй клик или
+      // вкладка, где его уже удалили, хотели ровно этого.
+      if (swapped.previousKey !== null) {
+        await removeAvatarFile(swapped.previousKey)
+      }
+
+      return toPublicUser(swapped.user)
+    },
+    {
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Delete the avatar of the current user', security },
+    },
+  )
 
 export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .use(jwtPlugin)

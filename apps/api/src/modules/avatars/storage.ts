@@ -2,7 +2,13 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, rename, rm, unlink } from 'node:fs/promises'
 
 import { AVATARS_DIRECTORY, insideUploadDir, writeBody } from '../files/storage'
-import { detectAvatarFormat, MAX_AVATAR_SIZE, SIGNATURE_LENGTH } from './formats'
+import {
+  AVATAR_FORMATS,
+  type AvatarFormat,
+  detectAvatarFormat,
+  MAX_AVATAR_SIZE,
+  SIGNATURE_LENGTH,
+} from './formats'
 
 /**
  * Аватар на диске: `<UPLOAD_DIR>/avatars/<ключ>.<ext>`, рядом с каталогами
@@ -14,6 +20,9 @@ import { detectAvatarFormat, MAX_AVATAR_SIZE, SIGNATURE_LENGTH } from './formats
 export const avatarFilePath = (avatarKey: string): string =>
   insideUploadDir(AVATARS_DIRECTORY, avatarKey)
 
+/** 128 бит — 32 hex-символа в ключе. */
+const KEY_BYTES = 16
+
 /**
  * 128 бит из CSPRNG в hex — новые при каждой загрузке. Не uuid v7: его первые
  * 48 бит — время загрузки, и половину адреса можно угадать. Не id
@@ -22,7 +31,22 @@ export const avatarFilePath = (avatarKey: string): string =>
  * файлов регистронезависимы, и два ключа, различающиеся регистром, легли бы в
  * один файл.
  */
-const randomKey = (): string => randomBytes(16).toString('hex')
+const randomKey = (): string => randomBytes(KEY_BYTES).toString('hex')
+
+/** Имя файла аватара целиком: ключ в hex строчными и расширение формата. */
+const AVATAR_FILE_NAME = new RegExp(`^[0-9a-f]{${KEY_BYTES * 2}}(\\.[a-z]+)$`)
+
+/**
+ * Формат файла по имени из адреса отдачи — или `null`, если имя не похоже на
+ * то, что выдаёт api. Проверка до базы и до диска: `..`, слеши, нулевые байты,
+ * `.part`, чужое расширение и другой регистр отсекаются здесь, а не путём на
+ * диске (на Windows `<ключ>.PNG` открыл бы тот же файл).
+ */
+export const formatOfAvatarFile = (fileName: string): AvatarFormat | null => {
+  const extension = AVATAR_FILE_NAME.exec(fileName)?.[1]
+
+  return AVATAR_FORMATS.find((format) => format.extension === extension) ?? null
+}
 
 export type ReceivedAvatar =
   { avatarKey: string } | { refused: 'too-large' | 'incomplete' | 'unsupported' }

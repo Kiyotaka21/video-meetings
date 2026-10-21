@@ -7,12 +7,14 @@ import { describe, expect, it } from 'bun:test'
 
 import { prisma } from '../src/db/prisma'
 import {
+  AVATAR_FORMATS,
   AVATAR_INCOMPLETE,
   AVATAR_TOO_LARGE,
   AVATAR_UNSUPPORTED,
   MAX_AVATAR_SIZE,
 } from '../src/modules/avatars/formats'
 import {
+  AVATAR_PATH,
   AVATAR_URL,
   avatarFileOf,
   AVATARS_DIR,
@@ -24,7 +26,7 @@ import {
   uploadAvatar,
 } from './helpers/avatars'
 import { messageOf } from './helpers/files'
-import { getJson } from './helpers/http'
+import { deleteJson, getJson, requestRaw } from './helpers/http'
 import { gif, heic, jpeg, padded, paddedStream, png, svg, text, wav, webp } from './helpers/images'
 import { decodeJwt } from './helpers/jwt'
 import { waitForLockWaiter } from './helpers/locks'
@@ -60,6 +62,39 @@ describe('Авторизация на /auth/me/avatar', () => {
 
     expect(response.status).toBe(401)
   })
+
+  it('DELETE без заголовка Authorization → 401', async () => {
+    const response = await deleteJson(AVATAR_PATH)
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('avatarUrl')
+  })
+
+  it('DELETE с негодным токеном → 401, аватар на месте', async () => {
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+
+    const response = await deleteJson(AVATAR_PATH, 'not-a-jwt-at-all')
+
+    expect(response.status).toBe(401)
+    expect(await currentAvatarUrl(user.token)).toBe(avatar)
+  })
+
+  for (const method of ['put', 'delete'] as const) {
+    it(`в спеке OpenAPI ${method.toUpperCase()} закрыт bearerAuth и описывает 401`, async () => {
+      // Без `detail.security` в Scalar нет поля для токена и роут выглядит
+      // открытым; без 401 в `response`-карте guard не опишет свой отказ.
+      type Spec = {
+        paths: Record<string, Record<string, { security?: unknown; responses?: object }>>
+      }
+
+      const response = await getJson('/docs/json')
+      const operation = (response.body as Spec).paths[AVATAR_PATH]?.[method]
+
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(Object.keys(operation?.responses ?? {})).toContain('401')
+    })
+  }
 })
 
 describe('PUT /auth/me/avatar', () => {
@@ -141,15 +176,23 @@ describe('PUT /auth/me/avatar', () => {
     expect(Math.abs(leading - Date.now())).toBeGreaterThan(60_000)
   })
 
-  it('замена: файла старого ключа на диске нет, нового — есть', async () => {
+  it('замена: файла старого ключа на диске нет, его адрес — 404, новый отдаётся', async () => {
     const user = await registerUser()
+    const replacement = png([0, 255, 0])
 
     const old = await uploadAvatar(user.token, png([255, 0, 0]))
-    const replaced = await uploadAvatar(user.token, png([0, 255, 0]))
+    const replaced = await uploadAvatar(user.token, replacement)
 
     expect(existsSync(avatarFileOf(old))).toBe(false)
     expect(existsSync(avatarFileOf(replaced))).toBe(true)
     expect(await currentAvatarUrl(user.token)).toBe(replaced)
+
+    expect((await requestRaw(old)).status).toBe(404)
+
+    const fresh = await requestRaw(replaced)
+
+    expect(fresh.status).toBe(200)
+    expect(await fresh.bytes()).toEqual(new Uint8Array(replacement))
   })
 
   it('загрузка не трогает аватар другого пользователя', async () => {
@@ -355,5 +398,169 @@ describe('Замена под замком строки пользователя
     expect(await currentAvatarUrl(user.token)).toBe(ours)
     expect(existsSync(avatarFileOf(ours))).toBe(true)
     expect(existsSync(join(AVATARS_DIR, neighbourKey))).toBe(false)
+  })
+})
+
+describe('DELETE /auth/me/avatar', () => {
+  it('отвечает пользователем с avatarUrl: null, файла нет, старый адрес — 404', async () => {
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+
+    const response = await deleteJson(AVATAR_PATH, user.token)
+
+    expect(response.status).toBe(200)
+    expect(asUser(response.body).avatarUrl).toBeNull()
+    expect(await currentAvatarUrl(user.token)).toBeNull()
+    expect(existsSync(avatarFileOf(avatar))).toBe(false)
+    expect((await requestRaw(avatar)).status).toBe(404)
+  })
+
+  it('отвечает тем же объектом, что GET /auth/me', async () => {
+    const user = await registerUser()
+    await uploadAvatar(user.token, webp())
+
+    const response = await deleteJson(AVATAR_PATH, user.token)
+    const me = await getJson('/auth/me', user.token)
+
+    expect(response.body).toEqual(me.body)
+  })
+
+  it('без аватара — тоже 200 и null: удалять нечего, цель достигнута', async () => {
+    // Второй клик или вкладка, где аватар уже удалили, не должны получать
+    // ошибку на то, чего и хотели.
+    const user = await registerUser()
+
+    const response = await deleteJson(AVATAR_PATH, user.token)
+
+    expect(response.status).toBe(200)
+    expect(asUser(response.body).avatarUrl).toBeNull()
+  })
+
+  it('удаляет только свой аватар', async () => {
+    const owner = await registerUser()
+    const stranger = await registerUser()
+    const ownerAvatar = await uploadAvatar(owner.token, png())
+    await uploadAvatar(stranger.token, png())
+
+    await deleteJson(AVATAR_PATH, stranger.token)
+
+    expect(await currentAvatarUrl(owner.token)).toBe(ownerAvatar)
+    expect((await requestRaw(ownerAvatar)).status).toBe(200)
+  })
+})
+
+describe('GET /avatars/:file', () => {
+  for (const [name, image] of FORMATS) {
+    it(`${name}: без токена, те же байты и Content-Type формата`, async () => {
+      const user = await registerUser()
+      const bytes = image()
+      const format = AVATAR_FORMATS.find((candidate) => candidate.matches(bytes))
+      const avatar = await uploadAvatar(user.token, bytes)
+
+      const response = await requestRaw(avatar)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(format?.mimeType ?? '')
+      expect(response.headers.get('content-length')).toBe(String(bytes.byteLength))
+      expect(await response.bytes()).toEqual(new Uint8Array(bytes))
+    })
+  }
+
+  it('заголовки: nosniff, кэш навсегда, картинку можно встраивать с чужого origin', async () => {
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+
+    const response = await requestRaw(avatar)
+
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    // Адрес меняется при каждой замене, поэтому картинку по нему можно не
+    // перепроверять никогда — даже при обновлении страницы.
+    expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    // `<img>` на фронтенде — другой origin (5173 против 3000).
+    expect(response.headers.get('cross-origin-resource-policy')).toBe('cross-origin')
+  })
+
+  it('Content-Type — по формату, а не по заявленному при загрузке', async () => {
+    const user = await registerUser()
+    const avatar = asUser((await putAvatar(imageUpload(png(), 'text/html'), user.token)).body)
+      .avatarUrl as string
+
+    const response = await requestRaw(avatar)
+
+    expect(response.headers.get('content-type')).toBe('image/png')
+  })
+
+  it('/avatars/<id пользователя> и /avatars/<id>.png — 404: адрес из id не составить', async () => {
+    const user = await registerUser()
+    await uploadAvatar(user.token, png())
+    const id = userIdOf(user.token)
+
+    for (const path of [`/avatars/${id}`, `/avatars/${id}.png`]) {
+      const response = await requestRaw(path)
+
+      expect(response.status).toBe(404)
+      expect(response.headers.get('content-type')).not.toStartWith('image/')
+    }
+  })
+
+  it('ключ есть в базе, но адрес чуть другой — 404', async () => {
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+    const key = avatar.slice('/avatars/'.length, -'.png'.length)
+
+    const lookalikes = [
+      `/avatars/${key}`, // без расширения
+      `/avatars/${key}.jpg`, // чужое расширение
+      `/avatars/${key}.PNG`, // регистр: на Windows это тот же файл на диске
+      `/avatars/${key.toUpperCase()}.png`,
+      `/avatars/${key}.png.part`,
+      `/avatars/${key}.png%00.jpg`,
+    ]
+
+    for (const path of lookalikes) {
+      expect({ path, status: (await requestRaw(path)).status }).toEqual({ path, status: 404 })
+    }
+  })
+
+  it('путь не выходит за каталог аватаров: ..%2F — 404', async () => {
+    // Файл, который отдала бы отдача, собирающая путь из адреса без проверки.
+    writeFileSync(join(AVATARS_DIR, '..', 'outside.png'), png())
+
+    for (const path of ['/avatars/..%2Foutside.png', '/avatars/%2E%2E%2Foutside.png']) {
+      expect({ path, status: (await requestRaw(path)).status }).toEqual({ path, status: 404 })
+    }
+  })
+
+  it('файл на диске есть, а строки нет — 404', async () => {
+    // Например, файл от загрузки, чья транзакция не прошла, или подобранный
+    // ключ: отдаёт только то, на что указывает строка пользователя.
+    const orphan = `${randomBytes(16).toString('hex')}.png`
+    writeFileSync(join(AVATARS_DIR, orphan), png())
+
+    const response = await requestRaw(`/avatars/${orphan}`)
+
+    expect(response.status).toBe(404)
+  })
+
+  it('строка есть, а файла нет — 404, а не пустой 200', async () => {
+    // `Bun.file` на несуществующий путь даёт размер 0 и пустое тело без
+    // ошибки: без проверки на диске рассинхрон выглядел бы «успешной» пустой
+    // картинкой.
+    const user = await registerUser()
+    const avatar = await uploadAvatar(user.token, png())
+    await Bun.file(avatarFileOf(avatar)).delete()
+
+    const response = await requestRaw(avatar)
+
+    expect(response.status).toBe(404)
+  })
+
+  it('отказ не кэшируется навсегда', async () => {
+    // Иначе адрес, по которому однажды ответили 404, браузер не перепросил бы
+    // никогда.
+    const response = await requestRaw(`/avatars/${randomBytes(16).toString('hex')}.png`)
+
+    expect(response.status).toBe(404)
+    expect(response.headers.get('cache-control') ?? '').not.toContain('immutable')
   })
 })
