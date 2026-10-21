@@ -25,6 +25,13 @@ model User {
   /// смены: `iat` в JWT точен до секунды, и токен той же секунды не отличить.
   tokenVersion Int @default(0) @map("token_version")
 
+  /// Имя файла аватара в `<UPLOAD_DIR>/avatars/`: 128 бит случайности в hex и
+  /// расширение формата, определённого по содержимому (`<ключ>.png`). Новое при
+  /// каждой загрузке, поэтому адрес `/avatars/<ключ>` можно кэшировать навсегда.
+  /// Отдача ищет строку по нему — unique-индекс и есть этот поиск. `null` — без
+  /// аватара.
+  avatarKey String? @unique @map("avatar_key")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

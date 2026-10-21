@@ -95,11 +95,11 @@ docker compose down -v                                   # снести вмес
 миграции в `apps/api/prisma/migrations/` (коммитятся), строка подключения — в
 `apps/api/.env`.
 
-| Таблица         | Что лежит                                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `users`         | `id`, `email` (unique), `password_hash`, `name` (может быть `null`), `token_version` (версия сессий), отметки |
-| `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                            |
-| `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id`          |
+| Таблица         | Что лежит                                                                                                                                |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `users`         | `id`, `email` (unique), `password_hash`, `name` и `avatar_key` (unique; оба могут быть `null`), `token_version` (версия сессий), отметки |
+| `meetings`      | `id`, `title`, `date`, `participants` (`text[]`), `owner_id` → `users.id`, отметки                                                       |
+| `meeting_files` | `id`, `name`, `size` (`bigint`), `mime_type`, `kind`, `status`, `path`, `meeting_id` → `meetings.id`                                     |
 
 **Состояние теперь в двух местах.** В `meeting_files` лежат только метаданные;
 сам файл — на диске api, в каталоге из `UPLOAD_DIR` (по умолчанию
@@ -291,12 +291,12 @@ curl -X POST http://localhost:3000/auth/login \
 
 ```bash
 curl http://localhost:3000/auth/me -H "authorization: Bearer $TOKEN"
-# 200 {"id":"01a086d0-...","email":"user@example.com","name":null}
+# 200 {"id":"01a086d0-...","email":"user@example.com","name":null,"avatarUrl":null}
 
 curl -X PATCH http://localhost:3000/auth/me \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"  Anna Petrova  "}'
-# 200 {"id":"01a086d0-...","email":"user@example.com","name":"Anna Petrova"}
+# 200 {"id":"01a086d0-...","email":"user@example.com","name":"Anna Petrova","avatarUrl":null}
 ```
 
 Адрес приходит из базы нормализованным (в нижнем регистре), а не в том виде, в

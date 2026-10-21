@@ -162,7 +162,7 @@ PRD оставлял открытым способ отдачи аватара �
 
 **Задачи**:
 
-- [ ] Поле `avatarKey String? @unique` (`avatar_key`) и миграция. Файл лежит в
+- [x] Поле `avatarKey String? @unique` (`avatar_key`) и миграция. Файл лежит в
       `<UPLOAD_DIR>/avatars/<ключ><ext>`; `/auth/me` и все ответы о
       пользователе отдают `avatarUrl` — путь `/avatars/<ключ><ext>` от корня
       api — или `null`.

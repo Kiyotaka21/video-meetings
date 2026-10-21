@@ -3,6 +3,7 @@ import { Elysia, t } from 'elysia'
 
 import { env } from '../config/env'
 import { prisma } from '../db/prisma'
+import { avatarUrl } from './avatars'
 
 /**
  * Границы пароля — одна схема на регистрацию, вход и смену пароля, а не три
@@ -54,10 +55,33 @@ const userResponse = t.Object({
   id: t.String(),
   email: t.String(),
   name: t.Nullable(t.String()),
+  /** Путь `/avatars/<ключ>.<ext>` от корня api, без токена; `null` — аватара нет. */
+  avatarUrl: t.Nullable(t.String()),
 })
 
-/** Поля пользователя, которые уходят наружу, — одни и те же у GET и PATCH. */
-const publicUser = { id: true, email: true, name: true } as const
+/**
+ * Колонки пользователя, из которых собирается ответ, — одни и те же у всех
+ * маршрутов `/auth/me`. Наружу они уходят через `toPublicUser`.
+ */
+const publicUser = { id: true, email: true, name: true, avatarKey: true } as const
+
+interface PublicUserRow {
+  id: string
+  email: string
+  name: string | null
+  avatarKey: string | null
+}
+
+/**
+ * Ответ о пользователе собирается в одном месте: фронтенд кладёт ответ любого
+ * маршрута `/auth/me` в общий `user` без повторного запроса, и маршрут с другой
+ * формой оставил бы в нём дыру. Ключ аватара наружу не уходит — только готовый
+ * путь к нему.
+ */
+const toPublicUser = ({ avatarKey, ...user }: PublicUserRow) => ({
+  ...user,
+  avatarUrl: avatarKey === null ? null : avatarUrl(avatarKey),
+})
 
 const security = [{ bearerAuth: [] }]
 
@@ -184,7 +208,7 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
         return status(401, UNAUTHORIZED)
       }
 
-      return user
+      return toPublicUser(user)
     },
     {
       response: {
@@ -202,11 +226,13 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
       const name = body.name.trim()
 
       try {
-        return await prisma.user.update({
+        const user = await prisma.user.update({
           where: { id: userId },
           data: { name: name === '' ? null : name },
           select: publicUser,
         })
+
+        return toPublicUser(user)
       } catch (error) {
         // Та же мёртвая сессия, что и на GET: пользователя удалили, токен жив.
         if (isRecordNotFound(error)) {

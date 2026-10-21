@@ -251,9 +251,9 @@ describe('POST /auth/login', () => {
 
 describe('GET /auth/me', () => {
   /** Ровно эти поля и ничего больше: клиент не должен видеть служебных колонок. */
-  const ME_FIELDS = ['email', 'id', 'name']
+  const ME_FIELDS = ['avatarUrl', 'email', 'id', 'name']
 
-  it('отдаёт id, e-mail и имя владельца токена', async () => {
+  it('отдаёт id, e-mail, имя и ссылку на аватар владельца токена', async () => {
     const user = await registerUser()
 
     const response = await getJson(ME, user.token)
@@ -261,17 +261,24 @@ describe('GET /auth/me', () => {
     expect(response.status).toBe(200)
     expect(Object.keys(response.body as object).sort()).toEqual(ME_FIELDS)
 
-    const { id, email, name } = response.body as { id: string; email: string; name: unknown }
+    const { id, email, name, avatarUrl } = response.body as {
+      id: string
+      email: string
+      name: unknown
+      avatarUrl: unknown
+    }
     expect(email).toBe(user.email)
     // id берётся из базы, а `sub` — из токена; расхождение означало бы, что
     // маршрут отвечает не про того пользователя, чей токен пришёл.
     expect(id).toBe(subjectOf(user.token))
-    // При регистрации имя не спрашивается. Поле при этом есть всегда: `null`
-    // значит «не задано», и клиенту не нужно отличать его от пропавшего ключа.
+    // При регистрации ни имя, ни аватар не спрашиваются. Поля при этом есть
+    // всегда: `null` значит «не задано», и клиенту не нужно отличать его от
+    // пропавшего ключа.
     expect(name).toBeNull()
+    expect(avatarUrl).toBeNull()
   })
 
-  it('не отдаёт хеш пароля и служебные отметки', async () => {
+  it('не отдаёт хеш пароля, ключ аватара и служебные отметки', async () => {
     const user = await registerUser()
 
     const response = await getJson(ME, user.token)
@@ -279,6 +286,9 @@ describe('GET /auth/me', () => {
     expect(response.body).not.toHaveProperty('passwordHash')
     expect(response.body).not.toHaveProperty('password_hash')
     expect(response.body).not.toHaveProperty('createdAt')
+    // Наружу уходит готовый путь `avatarUrl`, а не колонка, из которой он собран.
+    expect(response.body).not.toHaveProperty('avatarKey')
+    expect(response.body).not.toHaveProperty('tokenVersion')
   })
 
   it('отдаёт нормализованный e-mail, а не то, что прислали при регистрации', async () => {
