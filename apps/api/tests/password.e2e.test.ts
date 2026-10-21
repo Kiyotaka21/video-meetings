@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'bun:test'
 
 import { createMeeting, filesPath, messageOf } from './helpers/files'
-import { getJson, postJson, type ApiResponse } from './helpers/http'
+import { getJson, postFile, postJson, requestRaw, type ApiResponse } from './helpers/http'
 import { decodeJwt, signJwt, type JwtPayload } from './helpers/jwt'
 import { registerUser, TEST_PASSWORD } from './helpers/users'
 import { TEST_JWT_SECRET } from './setup'
@@ -332,5 +332,48 @@ describe('Отзыв сессий после смены пароля', () => {
     expect(decodeJwt(second).payload.ver).toBe(2)
     expect(await statusesWith(first, user.meetingId)).toEqual(REJECTED)
     expect(await statusesWith(second, user.meetingId)).toEqual(ALLOWED)
+  })
+
+  it('край одной секунды: тот же iat, что у нового токена, но прежняя версия — 401', async () => {
+    // Ради этого случая отзыв и сделан счётчиком. `iat` точен до секунды, и
+    // токен, выпущенный за мгновение до смены, по времени неотличим от
+    // нового: схема «iat раньше смены — отказ» либо пропустила бы его, либо
+    // отбила бы и новый. Здесь все claims — sub, email, iat, exp — взяты у
+    // нового токена, отличается только версия.
+    const user = await userWithMeeting()
+    const fresh = await changedPassword(user.token)
+    const { payload } = decodeJwt(fresh)
+
+    const sameSecond = signJwt({ ...payload, ver: user.payload.ver }, TEST_JWT_SECRET)
+    const sameSecondLegacy = signJwt(withoutVersion(payload), TEST_JWT_SECRET)
+    // Контроль: собранный тем же хелпером токен с новой версией проходит —
+    // значит, 401 выше из-за версии, а не из-за того, как собран токен.
+    const control = signJwt({ ...payload }, TEST_JWT_SECRET)
+
+    expect(typeof payload.iat).toBe('number')
+    expect(await statusesWith(sameSecond, user.meetingId)).toEqual(REJECTED)
+    expect(await statusesWith(sameSecondLegacy, user.meetingId)).toEqual(REJECTED)
+    expect(await statusesWith(control, user.meetingId)).toEqual(ALLOWED)
+    expect(await statusesWith(fresh, user.meetingId)).toEqual(ALLOWED)
+  })
+
+  it('ссылка на файл, выданная до смены, доживает свой срок: файловые токены не отзываются', async () => {
+    // Решение PRD: ссылка подписана своим секретом и живёт 15 минут, а отзыв
+    // потребовал бы похода в базу на каждую отдачу. Новую ссылку старый токен
+    // уже не получит — список файлов закрыт guard'ом (см. тесты выше).
+    const user = await userWithMeeting()
+    const upload = await postFile(
+      filesPath(user.meetingId),
+      { name: 'notes.md', type: 'text/markdown', body: 'notes before the change' },
+      user.token,
+    )
+    expect(upload.status).toBe(201)
+
+    await changedPassword(user.token)
+
+    const response = await requestRaw((upload.body as { url: string }).url)
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('notes before the change')
   })
 })
