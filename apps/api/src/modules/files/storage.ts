@@ -42,15 +42,31 @@ export const writeBody = async (
 
   try {
     if (body) {
-      for await (const chunk of body) {
+      // Читатель руками, а не `for await`, и без `releaseLock()`. На Bun
+      // 1.3.14 `releaseLock()` у читателя тела запроса, дочитанного до конца,
+      // через раз бросает «TypeError: undefined is not a function» — а
+      // встроенный async-итератор зовёт его в своём `finally`. Вживую это
+      // ронял каждый второй `PUT /auth/me/avatar` пятисоткой; через
+      // `app.handle` не воспроизводится. Отпускать замок незачем: тело больше
+      // никто не читает (ловушка в `apps/api/CLAUDE.md`).
+      const reader = body.getReader()
+
+      for (;;) {
+        const { done, value: chunk } = await reader.read()
+
+        if (done) {
+          break
+        }
+
         size += chunk.byteLength
 
         // Счётчик обязателен и при проверенном `Content-Length`: заголовок
         // присылает клиент, и он может соврать или не прислать его вовсе.
-        // Лишний чанк на диск не уходит, а выход из цикла отменяет поток —
-        // остаток тела не читается.
+        // Лишний чанк на диск не уходит, а отмена потока не даёт читать
+        // остаток тела.
         if (size > maxSize) {
           tooLarge = true
+          await reader.cancel().catch(() => {})
           break
         }
 
