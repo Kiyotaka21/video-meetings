@@ -15,7 +15,8 @@ export interface TestUser {
  */
 export const uniqueEmail = (): string => `e2e-${randomUUID()}@example.com`
 
-const PASSWORD = 'correct-horse-battery'
+/** Пароль, с которым `registerUser` заводит каждого: тестам смены пароля он нужен как текущий. */
+export const TEST_PASSWORD = 'correct-horse-battery'
 
 /**
  * Заводит нового пользователя через публичный маршрут и отдаёт его токен.
@@ -23,7 +24,7 @@ const PASSWORD = 'correct-horse-battery'
  */
 export const registerUser = async (): Promise<TestUser> => {
   const email = uniqueEmail()
-  const response = await postJson('/auth/register', { email, password: PASSWORD })
+  const response = await postJson('/auth/register', { email, password: TEST_PASSWORD })
 
   expect(response.status).toBe(201)
 

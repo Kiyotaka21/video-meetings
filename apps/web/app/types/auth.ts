@@ -7,9 +7,24 @@ export interface Credentials {
   password: string
 }
 
-/** Успешный ответ обоих маршрутов: JWT (HS256), в `sub` лежит id пользователя. */
+/**
+ * Успешный ответ регистрации, входа и смены пароля: JWT (HS256), в `sub` лежит
+ * id пользователя. После смены пароля токены, выпущенные раньше, api не
+ * принимает — этот заменяет их в куке.
+ */
 export interface TokenResponse {
   token: string
+}
+
+/**
+ * Тело `POST /auth/me/password` — схема `passwordChange` на api. Оба поля в тех
+ * же границах, что пароль в `Credentials`. Отказы: 403 — неверный текущий, 400 —
+ * новый совпадает с текущим, оба с текстом для показа как есть; не 401, который
+ * значит конец сессии.
+ */
+export interface PasswordChange {
+  currentPassword: string
+  newPassword: string
 }
 
 /**

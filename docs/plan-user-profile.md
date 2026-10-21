@@ -96,7 +96,7 @@ PRD оставлял открытым способ отдачи аватара �
       `/auth/register` и `/auth/login` несут `ver`; guard `authenticated` и
       `/auth/me` читают строку пользователя по `sub` и сверяют `ver` (нет claim —
       0): расхождение или удалённый пользователь — 401.
-- [ ] `POST /auth/me/password` с `{ currentPassword, newPassword }`: границы
+- [x] `POST /auth/me/password` с `{ currentPassword, newPassword }`: границы
       нового — 8–128, одна константа со схемой `credentials`. Текущий не
       совпал — 403 «Текущий пароль неверен»; новый равен текущему — 400 «Новый
       пароль совпадает с текущим»; иначе одним `update` — новый хеш и

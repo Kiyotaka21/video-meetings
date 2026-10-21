@@ -4,10 +4,24 @@ import { Elysia, t } from 'elysia'
 import { env } from '../config/env'
 import { prisma } from '../db/prisma'
 
+/**
+ * Границы пароля — одна схема на регистрацию, вход и смену пароля, а не три
+ * копии чисел: разъехавшись, они дали бы пароль, который можно поставить, но
+ * нельзя ввести при входе. Копия на клиенте — `apps/web/app/utils/auth.ts`.
+ */
+const password = t.String({ minLength: 8, maxLength: 128 })
+
 const credentials = t.Object({
   email: t.String({ format: 'email', minLength: 3, maxLength: 254 }),
-  password: t.String({ minLength: 8, maxLength: 128 }),
+  password,
 })
+
+/**
+ * Текущий пароль подчиняется тем же границам, что и на входе: пароля вне них
+ * нет ни у кого, а `maxLength` заодно не даёт гонять argon2 по мегабайтной
+ * строке.
+ */
+const passwordChange = t.Object({ currentPassword: password, newPassword: password })
 
 /** Граница имени — после обрезки пробелов по краям, а не по сырой строке. */
 const NAME_MAX_LENGTH = 50
@@ -53,6 +67,13 @@ const security = [{ bearerAuth: [] }]
  * адреса.
  */
 const INVALID_CREDENTIALS = { message: 'Invalid email or password' } as const
+
+/**
+ * Отказы смены пароля — по-русски и для показа как есть, как 415/413/409 у
+ * файлов встречи: оба про поле формы, и фронтенд выводит текст под ним.
+ */
+const WRONG_CURRENT_PASSWORD = { message: 'Текущий пароль неверен' } as const
+const SAME_PASSWORD = { message: 'Новый пароль совпадает с текущим' } as const
 
 /**
  * Хеш случайной строки, которую никто не знает. Сверяем пароль с ним, когда
@@ -148,6 +169,7 @@ export const authenticated = new Elysia({ name: 'authenticated' })
  * Здесь граница видна глазами — под guard'ом ровно то, что внутри инстанса.
  */
 const currentUserRoutes = new Elysia({ name: 'auth.me' })
+  .use(jwtPlugin)
   .use(authenticated)
   .get(
     '/me',
@@ -201,6 +223,65 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
         401: messageResponse,
       },
       detail: { summary: 'Update the name of the current user', security },
+    },
+  )
+  .post(
+    '/me/password',
+    async ({ userId, body, jwt, status }) => {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { passwordHash: true },
+      })
+
+      // Guard пользователя уже нашёл; пропасть он мог только в окне между чтениями.
+      if (!user) {
+        return status(401, UNAUTHORIZED)
+      }
+
+      // 403, а не 401: на фронтенде 401 значит «сессия кончилась», и опечатка
+      // в поле формы погасила бы куку и выкинула пользователя на /login.
+      if (!(await Bun.password.verify(body.currentPassword, user.passwordHash))) {
+        return status(403, WRONG_CURRENT_PASSWORD)
+      }
+
+      // Только после проверки текущего: на неверный текущий, совпавший с
+      // новым, ответ «совпадает с текущим» был бы неправдой.
+      if (body.newPassword === body.currentPassword) {
+        return status(400, SAME_PASSWORD)
+      }
+
+      try {
+        // Хеш и версия — одним `update`: между ними нет состояния, в котором
+        // пароль уже новый, а старые токены ещё проходят.
+        const updated = await prisma.user.update({
+          where: { id: userId },
+          data: {
+            passwordHash: await Bun.password.hash(body.newPassword),
+            tokenVersion: { increment: 1 },
+          },
+          select: { id: true, email: true, tokenVersion: true },
+        })
+
+        // Новый токен в ответ: вкладка, сменившая пароль, держит токен старой
+        // версии и без него вышла бы из системы вместе со всеми.
+        return { token: await jwt.sign(sessionClaims(updated)) }
+      } catch (error) {
+        if (isRecordNotFound(error)) {
+          return status(401, UNAUTHORIZED)
+        }
+
+        throw error
+      }
+    },
+    {
+      body: passwordChange,
+      response: {
+        200: tokenResponse,
+        400: messageResponse,
+        401: messageResponse,
+        403: messageResponse,
+      },
+      detail: { summary: 'Change the password and revoke all other sessions', security },
     },
   )
 
