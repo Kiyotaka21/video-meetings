@@ -9,7 +9,7 @@ definePageMeta({ middleware: 'auth' })
 
 useSeoMeta({ title: 'Мои встречи — Video Meetings', robots: 'noindex' })
 
-const { user, fetchUser, logout } = useAuth()
+const { user, fetchUser, logout, currentToken, handleUnauthorized } = useAuth()
 const { fetchMeetings } = useMeetings()
 const toast = useToast()
 
@@ -32,23 +32,21 @@ const load = async () => {
   isLoading.value = true
   failure.value = null
 
+  const sentToken = currentToken()
+
   try {
     const [, list] = await Promise.all([fetchUser(), fetchMeetings()])
 
     meetings.value = list
   } catch (error) {
-    // Токен в куке есть, middleware пропустил, а api его не принял: истёк,
-    // выпущен против другой базы или учётку удалили. Это конец сессии, а не
-    // сбой запроса, поэтому выходим, а не предлагаем повторить.
+    // Токен в куке есть, middleware пропустил, а api его не принял. Это конец
+    // сессии, а не сбой запроса, — если только соседняя вкладка не положила в
+    // куку новый токен: тогда загрузка повторяется с ним.
     if (isUnauthorized(error)) {
-      toast.add({
-        title: 'Сессия истекла',
+      await handleUnauthorized(sentToken, {
+        retry: load,
         description: 'Войдите снова, чтобы увидеть встречи.',
-        color: 'warning',
-        icon: 'i-lucide-clock-alert',
       })
-
-      await logout()
 
       return
     }

@@ -17,7 +17,7 @@ definePageMeta({ middleware: 'auth' })
 
 const route = useRoute()
 const toast = useToast()
-const { logout } = useAuth()
+const { currentToken, handleUnauthorized } = useAuth()
 const { fetchMeeting } = useMeetings()
 const { fetchFiles, deleteFile } = useMeetingFiles()
 const { upload, start: startUpload, cancel: cancelUpload } = useActiveUpload()
@@ -42,20 +42,11 @@ useSeoMeta({
 })
 
 /**
- * Токен в куке есть, middleware пропустил, а api его не принял: истёк, выпущен
- * против другой базы или учётку удалили. Это конец сессии, а не сбой запроса, —
- * та же ветка, что и в кабинете.
+ * Пояснение к тосту «Сессия истекла». Сам 401 разбирает `handleUnauthorized` —
+ * та же ветка, что в кабинете и на профиле: выход, если сессия мертва, и
+ * повтор, если соседняя вкладка уже положила в куку новый токен.
  */
-const endSession = async () => {
-  toast.add({
-    title: 'Сессия истекла',
-    description: 'Войдите снова, чтобы увидеть встречу.',
-    color: 'warning',
-    icon: 'i-lucide-clock-alert',
-  })
-
-  await logout()
-}
+const SESSION_ENDED = 'Войдите снова, чтобы увидеть встречу.'
 
 /**
  * Встреча и файлы запрашиваются параллельно и разбираются порознь: отказ списка
@@ -68,6 +59,8 @@ const load = async () => {
   filesFailure.value = null
   isMissing.value = false
 
+  const sentToken = currentToken()
+
   const [meetingResult, filesResult] = await Promise.allSettled([
     fetchMeeting(meetingId.value),
     fetchFiles(meetingId.value),
@@ -77,9 +70,10 @@ const load = async () => {
     (meetingResult.status === 'rejected' && isUnauthorized(meetingResult.reason)) ||
     (filesResult.status === 'rejected' && isUnauthorized(filesResult.reason))
 
+  // Скелетон остаётся до конца: и повтор, и выход на `/login` сменят его сами,
+  // а пустая карточка между ними мелькнула бы зря.
   if (unauthorized) {
-    isLoading.value = false
-    await endSession()
+    await handleUnauthorized(sentToken, { retry: load, description: SESSION_ENDED })
 
     return
   }
@@ -130,6 +124,7 @@ const refreshFiles = async () => {
   }
 
   const startedAt = listVersion
+  const sentToken = currentToken()
 
   try {
     const fresh = await fetchFiles(meetingId.value)
@@ -140,7 +135,7 @@ const refreshFiles = async () => {
     }
   } catch (error) {
     if (isUnauthorized(error)) {
-      await endSession()
+      await handleUnauthorized(sentToken, { retry: refreshFiles, description: SESSION_ENDED })
     }
   }
 }
@@ -154,6 +149,45 @@ const refuseUpload = (description: string) =>
     color: 'error',
     icon: 'i-lucide-triangle-alert',
   })
+
+/**
+ * Сама отправка — отдельно от проверок и тоста про брошенные разом: после 401
+ * со свежим токеном в куке повторяется только она.
+ */
+const sendFile = async (file: File): Promise<void> => {
+  const sentToken = currentToken()
+
+  try {
+    const uploaded = await startUpload(meetingId.value, file)
+
+    // Отменил сам — строка загрузки уже пропала, сообщать нечего.
+    if (!uploaded) {
+      return
+    }
+
+    // Список не перезапрашиваем: api вернул метаданные ровно этого файла, а
+    // сортировка по дате загрузки ставит его в конец — туда же, куда и мы.
+    setFiles([...files.value, uploaded])
+
+    toast.add({
+      title: 'Файл загружен',
+      description: uploaded.name,
+      color: 'success',
+      icon: 'i-lucide-circle-check',
+    })
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      await handleUnauthorized(sentToken, {
+        retry: () => sendFile(file),
+        description: SESSION_ENDED,
+      })
+
+      return
+    }
+
+    refuseUpload(describeUploadFailure(error))
+  }
+}
 
 const onSelect = async (file: File, ignored: number) => {
   // Проверка до отправки: на отказе на api не уходит ни одного запроса.
@@ -176,33 +210,7 @@ const onSelect = async (file: File, ignored: number) => {
     })
   }
 
-  try {
-    const uploaded = await startUpload(meetingId.value, file)
-
-    // Отменил сам — строка загрузки уже пропала, сообщать нечего.
-    if (!uploaded) {
-      return
-    }
-
-    // Список не перезапрашиваем: api вернул метаданные ровно этого файла, а
-    // сортировка по дате загрузки ставит его в конец — туда же, куда и мы.
-    setFiles([...files.value, uploaded])
-
-    toast.add({
-      title: 'Файл загружен',
-      description: uploaded.name,
-      color: 'success',
-      icon: 'i-lucide-circle-check',
-    })
-  } catch (error) {
-    if (isUnauthorized(error)) {
-      await endSession()
-
-      return
-    }
-
-    refuseUpload(describeUploadFailure(error))
-  }
+  await sendFile(file)
 }
 
 const overlay = useOverlay()
@@ -216,14 +224,12 @@ const removeFromList = async (fileId: string) => {
   filesSection.value?.focusHeading()
 }
 
-const onDelete = async (file: MeetingFile) => {
-  const confirmed = await deleteModal.open({ name: file.name }).result
-
-  if (!confirmed) {
-    return
-  }
-
-  deletingId.value = file.id
+/**
+ * Удаление уже подтверждённого файла — отдельно от диалога: после 401 со
+ * свежим токеном в куке повторяется запрос, а не вопрос «удалить?».
+ */
+const removeFile = async (file: MeetingFile): Promise<void> => {
+  const sentToken = currentToken()
 
   try {
     await deleteFile(meetingId.value, file.id)
@@ -237,7 +243,10 @@ const onDelete = async (file: MeetingFile) => {
     })
   } catch (error) {
     if (isUnauthorized(error)) {
-      await endSession()
+      await handleUnauthorized(sentToken, {
+        retry: () => removeFile(file),
+        description: SESSION_ENDED,
+      })
     } else if (statusOf(error) === 404) {
       // Файла уже нет — удалили в другой вкладке. Цель достигнута, строка уходит.
       await removeFromList(file.id)
@@ -249,6 +258,20 @@ const onDelete = async (file: MeetingFile) => {
         icon: 'i-lucide-triangle-alert',
       })
     }
+  }
+}
+
+const onDelete = async (file: MeetingFile) => {
+  const confirmed = await deleteModal.open({ name: file.name }).result
+
+  if (!confirmed) {
+    return
+  }
+
+  deletingId.value = file.id
+
+  try {
+    await removeFile(file)
   } finally {
     deletingId.value = null
   }

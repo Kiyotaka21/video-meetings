@@ -10,7 +10,7 @@ definePageMeta({ middleware: 'auth' })
 
 useSeoMeta({ title: 'Профиль — Video Meetings', robots: 'noindex' })
 
-const { user, fetchUser, updateName, changePassword, logout } = useAuth()
+const { user, fetchUser, updateName, changePassword, currentToken, handleUnauthorized } = useAuth()
 const toast = useToast()
 
 const isLoading = shallowRef(true)
@@ -21,20 +21,11 @@ const isChangingPassword = shallowRef(false)
 const passwordFailure = shallowRef<PasswordChangeFailure | null>(null)
 
 /**
- * Токен в куке есть, middleware пропустил, а api его не принял: истёк, выпущен
- * против другой базы или учётку удалили. Это конец сессии, а не сбой запроса, —
- * та же ветка, что и в кабинете и на странице встречи.
+ * Пояснение к тосту «Сессия истекла». Сам 401 разбирает `handleUnauthorized` —
+ * та же ветка, что в кабинете и на странице встречи: выход, если сессия мертва,
+ * и повтор, если соседняя вкладка уже положила в куку новый токен.
  */
-const endSession = async () => {
-  toast.add({
-    title: 'Сессия истекла',
-    description: 'Войдите снова, чтобы открыть профиль.',
-    color: 'warning',
-    icon: 'i-lucide-clock-alert',
-  })
-
-  await logout()
-}
+const SESSION_ENDED = 'Войдите снова, чтобы открыть профиль.'
 
 /**
  * Пользователь запрашивается заново, даже если пришёл с `/` и уже лежит в общем
@@ -46,11 +37,13 @@ const load = async () => {
   isLoading.value = true
   failure.value = null
 
+  const sentToken = currentToken()
+
   try {
     await fetchUser()
   } catch (error) {
     if (isUnauthorized(error)) {
-      await endSession()
+      await handleUnauthorized(sentToken, { retry: load, description: SESSION_ENDED })
 
       return
     }
@@ -67,10 +60,12 @@ onMounted(load)
  * Любой отказ, кроме 401, уходит текстом под поле, а не в алерт над формой:
  * поле в блоке одно, так что «не сохранилось» — всегда про него, а готовая
  * строка `help` под ним не даёт тексту сдвинуть вёрстку.
+ *
+ * Сам запрос — отдельной функцией, чтобы повтор после 401 со свежим токеном
+ * шёл под тем же `isSavingName`, что и первая попытка.
  */
-const onSaveName = async (name: string) => {
-  isSavingName.value = true
-  nameFailure.value = null
+const saveName = async (name: string): Promise<void> => {
+  const sentToken = currentToken()
 
   try {
     const saved = await updateName(name)
@@ -87,36 +82,39 @@ const onSaveName = async (name: string) => {
     })
   } catch (error) {
     if (isUnauthorized(error)) {
-      await endSession()
+      await handleUnauthorized(sentToken, {
+        retry: () => saveName(name),
+        description: SESSION_ENDED,
+      })
 
       return
     }
 
     nameFailure.value = describeNameFailure(error)
+  }
+}
+
+const onSaveName = async (name: string) => {
+  isSavingName.value = true
+  nameFailure.value = null
+
+  try {
+    await saveName(name)
   } finally {
     isSavingName.value = false
   }
 }
 
 /**
- * Пока запрос в полёте, повторная отправка не уходит — ни кликом, ни Enter'ом.
- * Выключенные поля и кнопка этого не гарантируют: `UForm` валидирует
- * асинхронно, и два `submit` подряд успевают пройти проверку раньше, чем
- * перерисовка их выключит. А на api две одновременные смены проходят обе, и
- * токен первой отзывает вторая: пришёл её ответ последним — в куке остался бы
- * мёртвый токен, и вкладка вылетела бы на следующем же запросе. Флаг ставится
- * до первого `await`, поэтому второй вызов видит его всегда.
- *
  * 403 и 400 — под своим полем, остальное про запрос целиком — тостом: в форме
  * из трёх полей ему нет своего места, а тост не сдвигает вёрстку.
+ *
+ * Сам запрос — отдельно от флага, как `saveName`: повтор после 401 со свежим
+ * токеном идёт под тем же флагом. Пароль в соседней вкладке сменили — повтор
+ * с прежним «текущим» получит честный 403, а не выход из системы.
  */
-const onChangePassword = async (change: PasswordChange) => {
-  if (isChangingPassword.value) {
-    return
-  }
-
-  isChangingPassword.value = true
-  passwordFailure.value = null
+const sendPasswordChange = async (change: PasswordChange): Promise<void> => {
+  const sentToken = currentToken()
 
   try {
     await changePassword(change)
@@ -129,7 +127,10 @@ const onChangePassword = async (change: PasswordChange) => {
     })
   } catch (error) {
     if (isUnauthorized(error)) {
-      await endSession()
+      await handleUnauthorized(sentToken, {
+        retry: () => sendPasswordChange(change),
+        description: SESSION_ENDED,
+      })
 
       return
     }
@@ -146,6 +147,28 @@ const onChangePassword = async (change: PasswordChange) => {
         icon: 'i-lucide-triangle-alert',
       })
     }
+  }
+}
+
+/**
+ * Пока запрос в полёте, повторная отправка не уходит — ни кликом, ни Enter'ом.
+ * Выключенные поля и кнопка этого не гарантируют: `UForm` валидирует
+ * асинхронно, и два `submit` подряд успевают пройти проверку раньше, чем
+ * перерисовка их выключит. А на api две одновременные смены проходят обе, и
+ * токен первой отзывает вторая: пришёл её ответ последним — в куке остался бы
+ * мёртвый токен, и вкладка вылетела бы на следующем же запросе. Флаг ставится
+ * до первого `await`, поэтому второй вызов видит его всегда.
+ */
+const onChangePassword = async (change: PasswordChange) => {
+  if (isChangingPassword.value) {
+    return
+  }
+
+  isChangingPassword.value = true
+  passwordFailure.value = null
+
+  try {
+    await sendPasswordChange(change)
   } finally {
     isChangingPassword.value = false
   }
