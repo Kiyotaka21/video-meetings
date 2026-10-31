@@ -144,6 +144,44 @@ export const useAuth = () => {
   }
 
   /**
+   * Тело — сам файл, а не `FormData`: api читает сырое тело (`parse: 'none'`)
+   * и сливает на диск потоком, а multipart разобрал бы в память ещё до
+   * обработчика. Ofetch `Blob` не сериализует (он не «простой объект»), и
+   * `Content-Type` из `image.type` ставит сам `fetch`; пустой тип — без
+   * заголовка, api его всё равно не читает: формат он узнаёт по первым байтам.
+   *
+   * `$fetch`, а не `XMLHttpRequest`, как у файлов встречи: прогресс для 2 МБ не
+   * нужен, и PRD его не требует. Ответ — тот же объект, что у `GET /auth/me`, и
+   * сразу ложится в общий `user`: карточка на `/` покажет новый аватар без
+   * повторного запроса.
+   */
+  const uploadAvatar = async (image: Blob): Promise<AuthUser> => {
+    const account = await $fetch<AuthUser>('/auth/me/avatar', {
+      baseURL: apiUrl,
+      method: 'PUT',
+      headers: authHeaders(),
+      body: image,
+    })
+
+    user.value = account
+
+    return account
+  }
+
+  /** Ответ — пользователь с `avatarUrl: null`, и он тоже сразу ложится в `user`. */
+  const deleteAvatar = async (): Promise<AuthUser> => {
+    const account = await $fetch<AuthUser>('/auth/me/avatar', {
+      baseURL: apiUrl,
+      method: 'DELETE',
+      headers: authHeaders(),
+    })
+
+    user.value = account
+
+    return account
+  }
+
+  /**
    * Смена пароля отзывает на api все токены пользователя, выпущенные раньше, —
    * и тот, с которым ушёл этот запрос. Поэтому токен из ответа сразу ложится в
    * куку с тем же `maxAge`, что при входе: без этого вкладка, сменившая пароль,
@@ -220,6 +258,8 @@ export const useAuth = () => {
     login,
     fetchUser,
     updateName,
+    uploadAvatar,
+    deleteAvatar,
     changePassword,
     logout,
     handleUnauthorized,

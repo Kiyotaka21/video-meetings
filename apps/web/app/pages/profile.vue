@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import type { PasswordChange, PasswordChangeFailure } from '~/types/auth'
+import DeleteAvatarModal from '~/components/profile/DeleteAvatarModal.vue'
+import type { AvatarAction, PasswordChange, PasswordChangeFailure } from '~/types/auth'
 import { isUnauthorized } from '~/utils/api'
 import { describePasswordChangeFailure } from '~/utils/auth'
-import { describeNameFailure, describeProfileFailure } from '~/utils/profile'
+import {
+  checkAvatarBeforeUpload,
+  describeAvatarDeleteFailure,
+  describeAvatarUploadFailure,
+  describeNameFailure,
+  describeProfileFailure,
+} from '~/utils/profile'
 
 // routeRules '/profile' -> ssr: false: страница за авторизацией, токен лежит в
 // куке и читается в браузере, индексировать здесь нечего.
@@ -10,13 +17,24 @@ definePageMeta({ middleware: 'auth' })
 
 useSeoMeta({ title: 'Профиль — Video Meetings', robots: 'noindex' })
 
-const { user, fetchUser, updateName, changePassword, currentToken, handleUnauthorized } = useAuth()
+const {
+  user,
+  fetchUser,
+  updateName,
+  uploadAvatar,
+  deleteAvatar,
+  changePassword,
+  currentToken,
+  handleUnauthorized,
+} = useAuth()
 const toast = useToast()
 
 const isLoading = shallowRef(true)
 const failure = shallowRef<string | null>(null)
 const isSavingName = shallowRef(false)
 const nameFailure = shallowRef<string | null>(null)
+const avatarBusy = shallowRef<AvatarAction | null>(null)
+const avatarFailure = shallowRef<string | null>(null)
 const isChangingPassword = shallowRef(false)
 const passwordFailure = shallowRef<PasswordChangeFailure | null>(null)
 
@@ -102,6 +120,129 @@ const onSaveName = async (name: string) => {
     await saveName(name)
   } finally {
     isSavingName.value = false
+  }
+}
+
+/**
+ * Сама отправка — отдельно от проверки и флага, как `saveName`: после 401 со
+ * свежим токеном в куке повторяется запрос, а не выбор файла. Любой отказ,
+ * кроме 401, — текстом под кнопками блока: 413, 415 и 400 — словами api.
+ */
+const sendAvatar = async (image: File): Promise<void> => {
+  const sentToken = currentToken()
+
+  try {
+    await uploadAvatar(image)
+
+    toast.add({
+      title: 'Аватар обновлён',
+      description: 'В кабинете он тоже уже новый.',
+      color: 'success',
+      icon: 'i-lucide-circle-check',
+    })
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      await handleUnauthorized(sentToken, {
+        retry: () => sendAvatar(image),
+        description: SESSION_ENDED,
+      })
+
+      return
+    }
+
+    avatarFailure.value = describeAvatarUploadFailure(error)
+  }
+}
+
+/**
+ * Пока запрос в полёте, второй файл не уходит: выключенная кнопка этого не
+ * гарантирует — между выбором файла и перерисовкой есть окно. Флаг ставится до
+ * первого `await`, как у смены пароля. Проверка до отправки — по расширению и
+ * размеру: на отказе на api не уходит ни одного запроса.
+ */
+const onSelectAvatar = async (image: File) => {
+  if (avatarBusy.value) {
+    return
+  }
+
+  avatarFailure.value = null
+
+  const refusal = checkAvatarBeforeUpload(image)
+
+  if (refusal) {
+    avatarFailure.value = refusal
+
+    return
+  }
+
+  avatarBusy.value = 'upload'
+
+  try {
+    await sendAvatar(image)
+  } finally {
+    avatarBusy.value = null
+  }
+}
+
+const overlay = useOverlay()
+const deleteAvatarModal = overlay.create(DeleteAvatarModal)
+
+/** Удаление уже подтверждённого аватара: после 401 повторяется запрос, а не вопрос. */
+const removeAvatar = async (): Promise<void> => {
+  const sentToken = currentToken()
+
+  try {
+    await deleteAvatar()
+
+    toast.add({
+      title: 'Аватар удалён',
+      description: 'В кабинете снова иконка.',
+      color: 'success',
+      icon: 'i-lucide-circle-check',
+    })
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      await handleUnauthorized(sentToken, {
+        retry: removeAvatar,
+        description: SESSION_ENDED,
+      })
+
+      return
+    }
+
+    avatarFailure.value = describeAvatarDeleteFailure(error)
+  }
+}
+
+/** Диалог уже открыт — второй клик по «Удалить» не открывает его заново. */
+let isConfirmingDelete = false
+
+const onDeleteAvatar = async () => {
+  if (avatarBusy.value || isConfirmingDelete) {
+    return
+  }
+
+  isConfirmingDelete = true
+
+  let confirmed: boolean | undefined
+
+  try {
+    confirmed = await deleteAvatarModal.open().result
+  } finally {
+    isConfirmingDelete = false
+  }
+
+  if (!confirmed || avatarBusy.value) {
+    return
+  }
+
+  avatarBusy.value = 'delete'
+  avatarFailure.value = null
+
+  try {
+    await removeAvatar()
+  } finally {
+    avatarBusy.value = null
   }
 }
 
@@ -236,6 +377,46 @@ const onChangePassword = async (change: PasswordChange) => {
               :loading="isSavingName"
               :failure="nameFailure"
               @submit="onSaveName"
+            />
+          </div>
+        </UCard>
+      </section>
+
+      <section class="flex flex-col gap-4">
+        <div class="flex items-center gap-3">
+          <UIcon name="i-lucide-circle-user-round" class="size-5 shrink-0 text-primary" />
+          <h2 class="text-xl font-semibold tracking-tight text-highlighted">Аватар</h2>
+        </div>
+
+        <UCard>
+          <!-- Своего `role="status"` у блока нет, как и у «Пароля». Геометрия —
+               как у готового блока: пояснение, круг с кнопкой, две строки
+               подсказки. -->
+          <div v-if="isLoading" aria-hidden="true" class="flex flex-col items-start gap-5">
+            <USkeleton class="h-5 w-60 max-w-full" />
+            <div class="flex w-full flex-col gap-3">
+              <div class="flex items-center gap-4">
+                <USkeleton class="size-20 shrink-0 rounded-full" />
+                <USkeleton class="h-8 w-32" />
+              </div>
+              <div class="flex h-10 flex-col justify-around">
+                <USkeleton class="h-4 w-48 max-w-full" />
+                <USkeleton class="h-4 w-60 max-w-full" />
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="user" class="flex flex-col gap-5">
+            <!-- В одну строку и на 360px, как пояснения у имени и пароля. -->
+            <p class="text-sm text-muted">В кабинете — рядом с адресом почты.</p>
+
+            <ProfileAvatarForm
+              :avatar-url="user.avatarUrl"
+              :alt="user.name ?? user.email"
+              :busy="avatarBusy"
+              :failure="avatarFailure"
+              @select="onSelectAvatar"
+              @delete="onDeleteAvatar"
             />
           </div>
         </UCard>
