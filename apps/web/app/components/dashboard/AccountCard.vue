@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import { apiHref } from '~/utils/api'
+
 interface Props {
   /** Адрес из `/auth/me`. `undefined` — либо ещё не пришёл, либо запрос отказал. */
   email?: string
   /** Имя из `/auth/me`. `null` — не задано, тогда карточка показывает адрес, как раньше. */
   name?: string | null
+  /** `avatarUrl` из `/auth/me` — путь от корня api. `null` — аватара нет, иконка-заглушка. */
+  avatarUrl?: string | null
   /**
    * Запрос ещё в полёте. Отличать от «не пришёл вовсе» обязательно: без этого
    * флага упавший `/auth/me` оставлял карточку в состоянии загрузки навсегда.
@@ -19,6 +23,22 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+
+const { apiUrl } = useRuntimeConfig().public
+
+/**
+ * Аватар для `UUser`: путь склеивается с `apiUrl`, как ссылка на файл встречи,
+ * — вставленный в `<img src>` как есть, он ушёл бы на origin фронтенда. Без
+ * аватара или с битой ссылкой `UAvatar` рисует иконку, как раньше. Текстовая
+ * альтернатива — то, что карточка показывает крупно: имя, без имени — адрес.
+ * Размеры `<img>` `UAvatar` ставит сам по своему `size-9`, и пришедшая картинка
+ * ничего не сдвигает.
+ */
+const avatar = computed(() => ({
+  src: props.avatarUrl ? apiHref(apiUrl, props.avatarUrl) : undefined,
+  alt: props.name || props.email,
+  icon: 'i-lucide-user',
+}))
 </script>
 
 <template>
@@ -34,7 +54,7 @@ const emit = defineEmits<Emits>()
         v-if="props.email && props.name"
         :name="props.name"
         :description="props.email"
-        :avatar="{ icon: 'i-lucide-user' }"
+        :avatar="avatar"
         size="lg"
         class="min-w-0"
         :ui="{ name: 'text-base/5 wrap-anywhere', description: 'break-all' }"
@@ -44,7 +64,7 @@ const emit = defineEmits<Emits>()
         v-else-if="props.email"
         :name="props.email"
         description="Аккаунт организатора"
-        :avatar="{ icon: 'i-lucide-user' }"
+        :avatar="avatar"
         size="lg"
         class="min-w-0"
         :ui="{ name: 'break-all' }"

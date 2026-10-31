@@ -83,6 +83,7 @@ const onLogout = async () => {
     <DashboardAccountCard
       :email="user?.email"
       :name="user?.name"
+      :avatar-url="user?.avatarUrl"
       :pending="isLoading"
       :loading="isLoggingOut"
       @logout="onLogout"
