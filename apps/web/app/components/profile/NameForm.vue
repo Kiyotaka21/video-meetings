@@ -9,8 +9,9 @@ interface Props {
   /** Запрос в полёте: блокирует поле и включает индикатор на кнопке. */
   loading?: boolean
   /**
-   * Отказ api — текст под полем. Компонент только показывает его, решение о
-   * повторе — за страницей.
+   * Отказ api — текст под полем. Компонент читает его на конце запроса и
+   * показывает, пока в поле отвергнутое значение; решение о повторе — за
+   * страницей.
    */
   failure?: string | null
 }
@@ -26,6 +27,25 @@ const emit = defineEmits<Emits>()
 const formId = useId()
 
 const state = reactive<NameState>({ name: props.name ?? '' })
+
+/** Отказ api — вместе со значением, которое api отверг. */
+interface Refusal {
+  message: string
+  value: string
+}
+
+const refusal = shallowRef<Refusal | null>(null)
+
+/**
+ * Текст отказа — только пока в поле то, что api отверг, как у блока «Пароль»:
+ * правка поля его снимает, и под полем снова подсказка или ошибка проверки.
+ * Иначе отказ висел бы до следующей успешной отправки и закрывал собой,
+ * например, «Не длиннее 50 символов» — проп `error` у `UFormField` сильнее
+ * ошибок формы.
+ */
+const refusalMessage = computed(() =>
+  refusal.value && state.name === refusal.value.value ? refusal.value.message : undefined,
+)
 
 const focusInForm = (selector: string) => {
   document.getElementById(formId)?.querySelector<HTMLElement>(selector)?.focus()
@@ -61,12 +81,19 @@ let focusedOnSubmit: HTMLElement | null = null
  */
 watch(
   () => props.loading,
-  (loading, wasLoading) => {
+  async (loading, wasLoading) => {
     if (loading || !wasLoading) {
       return
     }
 
+    refusal.value = null
+
     if (props.failure) {
+      refusal.value = { message: props.failure, value: state.name }
+
+      // Сначала текст под полем, потом фокус: скринридер читает
+      // `aria-describedby` в момент захода в поле.
+      await nextTick()
       focusInForm('input')
 
       return
@@ -116,7 +143,7 @@ const onSubmit = () => {
       name="name"
       label="Имя"
       :help="`До ${NAME_MAX_LENGTH} символов. Пустое — без имени.`"
-      :error="props.failure ?? undefined"
+      :error="refusalMessage"
       class="w-full"
     >
       <UInput
