@@ -271,7 +271,7 @@ bun run --filter @video-meetings/web postinstall
 | `app/utils/api.ts`                         | `statusOf`, `isUnauthorized`, текст «нет связи»                                                                             |
 | `app/utils/auth.ts`                        | границы полей, проверка формы смены пароля и разбор отказов `/auth/*`                                                       |
 | `app/utils/meetings.ts`                    | разбивка на блоки, формат даты, множественные формы                                                                         |
-| `app/utils/profile.ts`                     | копия правил имени с api, тексты ошибок, разбор отказов профиля                                                             |
+| `app/utils/profile.ts`                     | копия правил имени и лимитов аватара с api, тексты ошибок, разбор отказов профиля                                           |
 
 Неочевидности:
 

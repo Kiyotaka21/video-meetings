@@ -49,9 +49,10 @@ export const DOCUMENT_FORMATS_HINT = DOCUMENT_EXTENSIONS.map((ext) => ext.slice(
 
 /**
  * Расширение тем же правилом, что `extname` на api: ведущая точка — не
- * расширение (`.bashrc`), каталоги в имени не считаются.
+ * расширение (`.bashrc`), каталоги в имени не считаются. Им же проверяет формат
+ * аватара `checkAvatarBeforeUpload` в `utils/profile.ts`.
  */
-const extensionOf = (name: string): string => {
+export const extensionOf = (name: string): string => {
   const base = name.split(/[\\/]/).pop() ?? ''
   const dot = base.lastIndexOf('.')
 

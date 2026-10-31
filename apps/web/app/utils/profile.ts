@@ -1,6 +1,7 @@
 import type { FormError } from '@nuxt/ui'
 
-import { NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
+import { apiMessageOf, NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
+import { extensionOf } from '~/utils/files'
 
 /*
  * Правила имени — копия схемы `nameUpdate` (`NAME_PATTERN`) из
@@ -87,6 +88,88 @@ export const describeNameFailure = (error: unknown): string => {
       return 'Не сохранилось. Попробуйте ещё раз.'
   }
 }
+
+/*
+ * Ограничения аватара — копия `apps/api/src/modules/avatars/formats.ts`, ровно
+ * как лимиты файлов встречи в `utils/files.ts`. Разъезд не поймают ни типы, ни
+ * сборка: форма начнёт гнать на api заведомо отказные файлы или отбивать
+ * годные. Меняешь лимит или тексты на api — меняй здесь, и наоборот. Тексты
+ * отказов те же, что отдаёт api, — пользователь видит одну и ту же фразу, кто
+ * бы ни отказал.
+ *
+ * Формат здесь судится по расширению, а api — по первым байтам файла. Клиенту
+ * хватает отсечь очевидное без запроса: `.gif`, `.svg` и `.heic` до api не
+ * доедут, а `.png` с чужим содержимым отобьёт api своим 415 — тем же текстом.
+ * Заявленный тип не смотрим: HEIC браузер на Windows часто отдаёт с пустым
+ * `type`, а api его не читает вовсе.
+ */
+
+/** 2 МиБ — столько файловый менеджер и api показывают как «2 МБ». */
+export const MAX_AVATAR_SIZE = 2 * 1024 ** 2
+
+/** Расширения трёх форматов api: JPEG (`.jpg` и `.jpeg`), PNG и WebP. */
+const AVATAR_EXTENSIONS: readonly string[] = ['.jpg', '.jpeg', '.png', '.webp']
+
+const AVATAR_TOO_LARGE = 'Изображение больше 2 МБ'
+
+const AVATAR_UNSUPPORTED = 'Подходят только изображения JPEG, PNG и WebP'
+
+/**
+ * `accept` для диалога выбора — подсказка диалогу, а не проверка: «Все файлы»
+ * в нём выбрать можно, и такой файл отобьёт `checkAvatarBeforeUpload`. Только
+ * расширения, без MIME-типов: по `image/jpeg` Chrome на Windows показал бы и
+ * `.jfif`, который проверка ниже не пропустит.
+ */
+export const AVATAR_ACCEPT = AVATAR_EXTENSIONS.join(',')
+
+/**
+ * Проверка до отправки: формат по расширению и размер. `null` — файл годен.
+ * Отказ здесь означает, что на api не ушло ни одного запроса.
+ *
+ * Формат — раньше размера, хотя api отвечает 413 раньше 415 (размер он знает
+ * из `Content-Length` до чтения тела): `.gif` на 3 МБ не станет годным, если
+ * его ужать, и «больше 2 МБ» отправило бы пользователя ужимать то, что всё
+ * равно не примут. До api такой файл не доезжает, так что разные ответы на
+ * один файл не встретятся.
+ */
+export const checkAvatarBeforeUpload = (image: File): string | null => {
+  if (!AVATAR_EXTENSIONS.includes(extensionOf(image.name))) {
+    return AVATAR_UNSUPPORTED
+  }
+
+  if (image.size > MAX_AVATAR_SIZE) {
+    return AVATAR_TOO_LARGE
+  }
+
+  return null
+}
+
+/**
+ * Отказ `PUT /auth/me/avatar`. 401 сюда не попадает: его ловит
+ * `isUnauthorized` раньше и заканчивает сессию.
+ *
+ * Формат (415), размер (413) и тело, пришедшее не целиком (400), api объясняет
+ * сам — по-русски и для показа как есть, как у файлов встречи. Обычно такой
+ * файл до api не доезжает, но рубеж там: `.png` с чужим содержимым или
+ * разъехавшаяся копия лимита приедут отсюда, и «попробуйте ещё раз» на них
+ * было бы враньём.
+ */
+export const describeAvatarUploadFailure = (error: unknown): string => {
+  switch (statusOf(error)) {
+    case undefined:
+      return NO_CONNECTION_MESSAGE
+    case 400:
+    case 413:
+    case 415:
+      return apiMessageOf(error) ?? 'Аватар не загрузился. Попробуйте ещё раз.'
+    default:
+      return 'Аватар не загрузился. Попробуйте ещё раз.'
+  }
+}
+
+/** Отказ `DELETE /auth/me/avatar`. 401 сюда не попадает, как и у загрузки. */
+export const describeAvatarDeleteFailure = (error: unknown): string =>
+  statusOf(error) === undefined ? NO_CONNECTION_MESSAGE : 'Аватар не удалился. Попробуйте ещё раз.'
 
 /**
  * Отказ `GET /auth/me` на странице профиля. 401 сюда не попадает: его ловит

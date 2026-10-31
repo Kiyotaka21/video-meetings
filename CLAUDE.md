@@ -285,7 +285,12 @@ Prettier, TypeScript. `@nuxt/ui` и `tailwindcss` относятся к фрон
 `apps/web/app/utils/files.ts` и повторяют `apps/api/src/modules/files/limits.ts`
 вместе с русскими текстами отказов — пользователь видит одну фразу, кто бы ни
 отказал. Разъедутся — форма начнёт отбивать годное или пропускать на api то,
-что получит 413/415; ни типы, ни сборка этого не заметят.
+что получит 413/415; ни типы, ни сборка этого не заметят. Так же устроен
+аватар на `/profile`: `.jpg`, `.jpeg`, `.png`, `.webp`, 2 МБ и оба текста отказа
+лежат в `apps/web/app/utils/profile.ts` и повторяют
+`apps/api/src/modules/avatars/formats.ts`. Формат клиент судит по расширению, а
+api — по первым байтам файла: клиент отсекает очевидное (`.gif`, `.heic`) без
+запроса, а `.png` с чужим содержимым всё равно отобьёт api тем же текстом.
 
 **Файл уезжает сырым телом, а его имя — заголовком, и обе стороны знают про
 percent-encoding.** `POST /meetings/:id/files` не парсит тело (`multipart` в Bun
@@ -395,6 +400,7 @@ cmd //c mklink //J ".claude\\skills\\<имя>" ".agents\\skills\\<имя>"
 | Правка схемы `nameUpdate` (`NAME_PATTERN`) на api                         | `validateName` в `apps/web/app/utils/profile.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                  |
 | Новый маршрут `/auth/*` или поле в его ответе                             | `apps/web/app/types/auth.ts`, `useAuth.ts`, тест в `apps/api/tests/auth.e2e.test.ts` (пароль — `password.e2e.test.ts`), таблица маршрутов в `apps/api/CLAUDE.md`                               |
 | Правка контракта загрузки файла (заголовки, поля ответа, форматы, лимиты) | `apps/web/app/types/files.ts`, `useMeetingFiles.ts` и копия лимитов в `apps/web/app/utils/files.ts`, тесты в `apps/api/tests/files*.e2e.test.ts`, разделы про файлы в обоих `apps/*/CLAUDE.md` |
+| Правка форматов, лимита или текстов аватара (`avatars/formats.ts` на api) | `checkAvatarBeforeUpload` и копия в `apps/web/app/utils/profile.ts`, тесты в `apps/api/tests/avatar.e2e.test.ts`, разделы про аватар в обоих `apps/*/CLAUDE.md`                                |
 | Новый сервис или порт в `docker-compose.yml`                              | раздел «База данных» в `README.md`, «Postgres живёт в compose» здесь, корневой `.env.example`                                                                                                  |
 | Правка `prisma/schema.prisma`                                             | миграция в том же коммите (`bun run db:migrate`), раздел «База данных» в `README.md` при новой таблице                                                                                         |
 | Обход или ловушка, которую пришлось искать                                | раздел «Ловушки, на которые уже наступали» соответствующего `apps/*/CLAUDE.md` — с причиной, не только с рецептом                                                                              |
