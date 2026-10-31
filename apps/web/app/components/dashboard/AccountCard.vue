@@ -70,16 +70,22 @@ const avatar = computed(() => ({
         :ui="{ name: 'break-all' }"
       />
 
-      <!-- Заглушка той же высоты, что и `UUser`: иначе появление адреса сдвигало
-           бы список встреч вниз.
+      <!-- Заглушка той же геометрии, что и `UUser` с `size="lg"`: круг 36px
+           (`size-9`), зазор 10px (`gap-2.5`), строка 40px — две строки текста
+           по 20px. Иначе появление адреса сдвигало бы список встреч вниз, а
+           круг на глазах менял бы размер.
 
            `aria-hidden` на обёртке, а не на самих `USkeleton`: каждый из них
            рендерит `role="alert"` с `aria-live="polite"` и `aria-label="loading"`,
            и три таких в одной карточке — три конкурирующих живых региона,
            объявляющих чужое английское слово. Скрытый предок выключает всё
            поддерево разом; о загрузке сообщает один `role="status"` на странице. -->
-      <div v-else-if="props.pending" aria-hidden="true" class="flex min-w-0 items-center gap-3">
-        <USkeleton class="size-10 shrink-0 rounded-full" />
+      <div
+        v-else-if="props.pending"
+        aria-hidden="true"
+        class="flex h-10 min-w-0 items-center gap-2.5"
+      >
+        <USkeleton class="size-9 shrink-0 rounded-full" />
         <div class="flex flex-col gap-2">
           <USkeleton class="h-4 w-40 sm:w-56" />
           <USkeleton class="h-3 w-32" />
