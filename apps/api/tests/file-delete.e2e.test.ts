@@ -165,8 +165,11 @@ describe('removeMeetingFiles', () => {
     expect(existsSync(meetingDir(meetingId))).toBe(false)
   })
 
-  // Пустой или кривой id превратился бы в `rm -rf UPLOAD_DIR` или выше.
-  for (const meetingId of ['', '.', '..', '../..']) {
+  // Пустой или кривой id превратился бы в `rm -rf UPLOAD_DIR` или выше, а
+  // `avatars` — в `rm -rf` аватаров всех пользователей: их каталог лежит рядом
+  // с каталогами встреч. На Windows имена регистронезависимы, поэтому и
+  // `Avatars`. Вложенный путь задел бы один чужой файл.
+  for (const meetingId of ['', '.', '..', '../..', 'avatars', 'Avatars', 'avatars/key.png']) {
     it(`отказывается убирать «${meetingId}» — это не каталог встречи`, async () => {
       await expect(removeMeetingFiles(meetingId)).rejects.toThrow()
     })

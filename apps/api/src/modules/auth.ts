@@ -3,15 +3,121 @@ import { Elysia, t } from 'elysia'
 
 import { env } from '../config/env'
 import { prisma } from '../db/prisma'
+import { avatarUrl } from './avatars'
+import {
+  AVATAR_INCOMPLETE,
+  AVATAR_TOO_LARGE,
+  AVATAR_UNSUPPORTED,
+  MAX_AVATAR_SIZE,
+} from './avatars/formats'
+import { receiveAvatar, removeAvatarFile } from './avatars/storage'
+
+/**
+ * Границы пароля — одна схема на регистрацию, вход и смену пароля, а не три
+ * копии чисел: разъехавшись, они дали бы пароль, который можно поставить, но
+ * нельзя ввести при входе. Копия на клиенте — `apps/web/app/utils/auth.ts`.
+ */
+const password = t.String({ minLength: 8, maxLength: 128 })
 
 const credentials = t.Object({
   email: t.String({ format: 'email', minLength: 3, maxLength: 254 }),
-  password: t.String({ minLength: 8, maxLength: 128 }),
+  password,
 })
+
+/**
+ * Текущий пароль подчиняется тем же границам, что и на входе: пароля вне них
+ * нет ни у кого, а `maxLength` заодно не даёт гонять argon2 по мегабайтной
+ * строке.
+ */
+const passwordChange = t.Object({ currentPassword: password, newPassword: password })
+
+/** Граница имени — после обрезки пробелов по краям, а не по сырой строке. */
+const NAME_MAX_LENGTH = 50
+
+// Перевод строки и прочие управляющие (Cc), плюс разделители строк и абзацев:
+// в имени они не нужны ни внутри, ни по краям.
+const CONTROL = '\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029'
+// Что срезает `trim()` за вычетом управляющих: пробелы Zs и BOM.
+const SPACE = '\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\uFEFF'
+const VISIBLE = `[^${SPACE}${CONTROL}]`
+
+/**
+ * Схема видит сырую строку, а длина считается после `trim()`, поэтому граница
+ * зашита в шаблон: пробелы, затем до 50 символов, которые начинаются и кончаются
+ * не пробелом, затем снова пробелы. Так отказ остаётся обычным 422 валидатора,
+ * а не второй веткой в обработчике со своим телом ответа.
+ *
+ * Хвостовые пробелы стоят внутри необязательной группы намеренно: в форме
+ * `^\s*(…)?\s*$` строка из одних пробелов перед чужим символом даёт квадратичный
+ * перебор, а так — линейный. Замер на Bun 1.3.14: 40 000 пробелов и перевод
+ * строки — 2 с против 0 мс, а тело JSON api читает любого размера.
+ */
+const NAME_PATTERN = `^[${SPACE}]*(?:${VISIBLE}(?:[^${CONTROL}]{0,${NAME_MAX_LENGTH - 2}}${VISIBLE})?[${SPACE}]*)?$`
+
+const nameUpdate = t.Object({ name: t.String({ pattern: NAME_PATTERN }) })
 
 const tokenResponse = t.Object({ token: t.String() })
 const messageResponse = t.Object({ message: t.String() })
-const userResponse = t.Object({ id: t.String(), email: t.String() })
+const userResponse = t.Object({
+  id: t.String(),
+  email: t.String(),
+  name: t.Nullable(t.String()),
+  /** Путь `/avatars/<ключ>.<ext>` от корня api, без токена; `null` — аватара нет. */
+  avatarUrl: t.Nullable(t.String()),
+})
+
+/**
+ * Колонки пользователя, из которых собирается ответ, — одни и те же у всех
+ * маршрутов `/auth/me`. Наружу они уходят через `toPublicUser`.
+ */
+const publicUser = { id: true, email: true, name: true, avatarKey: true } as const
+
+interface PublicUserRow {
+  id: string
+  email: string
+  name: string | null
+  avatarKey: string | null
+}
+
+/**
+ * Ответ о пользователе собирается в одном месте: фронтенд кладёт ответ любого
+ * маршрута `/auth/me` в общий `user` без повторного запроса, и маршрут с другой
+ * формой оставил бы в нём дыру. Ключ аватара наружу не уходит — только готовый
+ * путь к нему.
+ */
+const toPublicUser = ({ avatarKey, ...user }: PublicUserRow) => ({
+  ...user,
+  avatarUrl: avatarKey === null ? null : avatarUrl(avatarKey),
+})
+
+/**
+ * Ставит пользователю ключ аватара (`null` — убирает) и отдаёт прежний, чтобы
+ * обработчик удалил его файл после коммита. `null` вместо результата —
+ * пользователя уже нет.
+ *
+ * Прежний ключ читается под замком строки (`FOR UPDATE`): одной транзакции
+ * мало, в READ COMMITTED чтение ничего не блокирует. Без замка две замены
+ * подряд обе прочли бы один и тот же прежний ключ, вторая затёрла бы ключ
+ * первой — и файл первой остался бы на диске без строки навсегда. С замком
+ * вторая ждёт коммита первой и видит уже её ключ.
+ */
+const swapAvatarKey = (userId: string, avatarKey: string | null) =>
+  prisma.$transaction(async (tx) => {
+    const [locked] = await tx.$queryRaw<Array<{ avatar_key: string | null }>>`
+      SELECT avatar_key FROM users WHERE id = ${userId} FOR UPDATE`
+
+    if (!locked) {
+      return null
+    }
+
+    const user = await tx.user.update({
+      where: { id: userId },
+      data: { avatarKey },
+      select: publicUser,
+    })
+
+    return { user, previousKey: locked.avatar_key }
+  })
 
 const security = [{ bearerAuth: [] }]
 
@@ -21,6 +127,13 @@ const security = [{ bearerAuth: [] }]
  * адреса.
  */
 const INVALID_CREDENTIALS = { message: 'Invalid email or password' } as const
+
+/**
+ * Отказы смены пароля — по-русски и для показа как есть, как 415/413/409 у
+ * файлов встречи: оба про поле формы, и фронтенд выводит текст под ним.
+ */
+const WRONG_CURRENT_PASSWORD = { message: 'Текущий пароль неверен' } as const
+const SAME_PASSWORD = { message: 'Новый пароль совпадает с текущим' } as const
 
 /**
  * Хеш случайной строки, которую никто не знает. Сверяем пароль с ним, когда
@@ -37,6 +150,10 @@ const normalizeEmail = (email: string): string => email.trim().toLowerCase()
 const isUniqueViolation = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002'
 
+/** P2025 — строки для `update` нет: пользователя удалили, а токен ещё жив. */
+const isRecordNotFound = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025'
+
 /**
  * Один инстанс на всё приложение: и подписывает токены, и проверяет их. Elysia
  * дедуплицирует плагины по имени, так что `.use(jwtPlugin)` в нескольких модулях
@@ -46,6 +163,26 @@ const jwtPlugin = jwt({ name: 'jwt', secret: env.jwtSecret, exp: env.jwtExpiresI
 
 const bearerToken = (header: string | undefined): string | undefined =>
   header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined
+
+/**
+ * Claims сессионного токена — одни у всех маршрутов, которые его выдают.
+ * `ver` — версия сессий пользователя: guard сравнивает её с `tokenVersion` в
+ * базе, и токен, выпущенный до смены пароля, перестаёт проходить.
+ */
+const sessionClaims = (user: { id: string; email: string; tokenVersion: number }) => ({
+  sub: user.id,
+  email: user.email,
+  ver: user.tokenVersion,
+})
+
+/**
+ * Версия, которой считается токен без `ver`: такие выпускались до появления
+ * счётчика. Она же — `@default` колонки, поэтому выкатка никого не
+ * разлогинивает, а первая смена пароля отзывает и их.
+ */
+const VERSION_BEFORE_COUNTER = 0
+
+const UNAUTHORIZED = { message: 'Unauthorized' } as const
 
 /**
  * Guard для маршрутов под авторизацией: `.use(authenticated)` — и в контексте
@@ -64,45 +201,251 @@ export const authenticated = new Elysia({ name: 'authenticated' })
     // формат, истёкший exp. Токен без `sub` формально валиден, но пользователя
     // по нему не найти — для нас это тоже 401.
     if (payload === false || typeof payload.sub !== 'string') {
-      return status(401, { message: 'Unauthorized' })
+      return status(401, UNAUTHORIZED)
+    }
+
+    // Подпись говорит только, что токен выпустили мы, а не что сессия жива:
+    // пароль могли сменить, учётку — удалить. Это поход в базу на каждый
+    // закрытый запрос, поэтому — по первичному ключу и одна колонка.
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { tokenVersion: true },
+    })
+
+    // Строгое сравнение: `ver` выпускаем только мы и только числом, так что
+    // `"0"` — не версия 0, а чужой формат.
+    if (!user || (payload.ver ?? VERSION_BEFORE_COUNTER) !== user.tokenVersion) {
+      return status(401, UNAUTHORIZED)
     }
 
     return { userId: payload.sub }
   })
 
 /**
- * `/auth/me` — единственный закрытый роут в этом модуле, поэтому он вынесен в
- * отдельный инстанс, а не дописан к `authModule` после `.use(authenticated)`.
+ * `/auth/me` — закрытые роуты этого модуля, поэтому они вынесены в отдельный
+ * инстанс, а не дописаны к `authModule` после `.use(authenticated)`.
  * Hook'и Elysia действуют на роуты, объявленные после них: при дописывании
  * порядок строк в файле начал бы решать, открыт `/auth/register` или закрыт.
  * Здесь граница видна глазами — под guard'ом ровно то, что внутри инстанса.
  */
-const currentUserRoutes = new Elysia({ name: 'auth.me' }).use(authenticated).get(
-  '/me',
-  async ({ userId, status }) => {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, email: true },
-    })
+const currentUserRoutes = new Elysia({ name: 'auth.me' })
+  .use(jwtPlugin)
+  .use(authenticated)
+  .get(
+    '/me',
+    async ({ userId, status }) => {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: publicUser })
 
-    // Подпись наша и `sub` на месте, но пользователя нет: учётку удалили либо
-    // токен выпущен против другой базы. Для клиента это та же мёртвая сессия,
-    // что и истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
-    // /login» покрывало все случаи одной веткой, без разбора 404.
-    if (!user) {
-      return status(401, { message: 'Unauthorized' })
-    }
+      // Токен удалённого пользователя отбил уже guard, но между его чтением и
+      // этим учётку могли удалить. Для клиента это та же мёртвая сессия, что и
+      // истёкший токен, — отвечаем 401, чтобы правило «401 → выйти и на
+      // /login» покрывало все случаи одной веткой, без разбора 404.
+      if (!user) {
+        return status(401, UNAUTHORIZED)
+      }
 
-    return user
-  },
-  {
-    response: {
-      200: userResponse,
-      401: messageResponse,
+      return toPublicUser(user)
     },
-    detail: { summary: 'Get the current user', security },
-  },
-)
+    {
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Get the current user', security },
+    },
+  )
+  .patch(
+    '/me',
+    async ({ userId, body, status }) => {
+      // Шаблон уже отбил управляющие символы, так что `trim()` срезает только
+      // пробелы. Пустое после обрезки — сброс: в базе «нет имени» — это `null`.
+      const name = body.name.trim()
+
+      try {
+        const user = await prisma.user.update({
+          where: { id: userId },
+          data: { name: name === '' ? null : name },
+          select: publicUser,
+        })
+
+        return toPublicUser(user)
+      } catch (error) {
+        // Та же мёртвая сессия, что и на GET: пользователя удалили, токен жив.
+        if (isRecordNotFound(error)) {
+          return status(401, UNAUTHORIZED)
+        }
+
+        throw error
+      }
+    },
+    {
+      body: nameUpdate,
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Update the name of the current user', security },
+    },
+  )
+  .post(
+    '/me/password',
+    async ({ userId, body, jwt, status }) => {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { passwordHash: true },
+      })
+
+      // Guard пользователя уже нашёл; пропасть он мог только в окне между чтениями.
+      if (!user) {
+        return status(401, UNAUTHORIZED)
+      }
+
+      // 403, а не 401: на фронтенде 401 значит «сессия кончилась», и опечатка
+      // в поле формы погасила бы куку и выкинула пользователя на /login.
+      if (!(await Bun.password.verify(body.currentPassword, user.passwordHash))) {
+        return status(403, WRONG_CURRENT_PASSWORD)
+      }
+
+      // Только после проверки текущего: на неверный текущий, совпавший с
+      // новым, ответ «совпадает с текущим» был бы неправдой.
+      if (body.newPassword === body.currentPassword) {
+        return status(400, SAME_PASSWORD)
+      }
+
+      try {
+        // Хеш и версия — одним `update`: между ними нет состояния, в котором
+        // пароль уже новый, а старые токены ещё проходят.
+        const updated = await prisma.user.update({
+          where: { id: userId },
+          data: {
+            passwordHash: await Bun.password.hash(body.newPassword),
+            tokenVersion: { increment: 1 },
+          },
+          select: { id: true, email: true, tokenVersion: true },
+        })
+
+        // Новый токен в ответ: вкладка, сменившая пароль, держит токен старой
+        // версии и без него вышла бы из системы вместе со всеми.
+        return { token: await jwt.sign(sessionClaims(updated)) }
+      } catch (error) {
+        if (isRecordNotFound(error)) {
+          return status(401, UNAUTHORIZED)
+        }
+
+        throw error
+      }
+    },
+    {
+      body: passwordChange,
+      response: {
+        200: tokenResponse,
+        400: messageResponse,
+        401: messageResponse,
+        403: messageResponse,
+      },
+      detail: { summary: 'Change the password and revoke all other sessions', security },
+    },
+  )
+  .put(
+    '/me/avatar',
+    async ({ userId, request, headers, status }) => {
+      // Основной рубеж — заявленный размер: браузер шлёт `Content-Length` у
+      // `Blob` всегда, и только отказ до чтения тела гарантированно доезжает до
+      // клиента. Заголовка нет или он не число — судит счётчик в `writeBody`.
+      if (Number(headers['content-length']) > MAX_AVATAR_SIZE) {
+        return status(413, { message: AVATAR_TOO_LARGE })
+      }
+
+      const received = await receiveAvatar(request.body, headers['content-length'])
+
+      if ('refused' in received) {
+        if (received.refused === 'too-large') {
+          return status(413, { message: AVATAR_TOO_LARGE })
+        }
+
+        if (received.refused === 'incomplete') {
+          return status(400, { message: AVATAR_INCOMPLETE })
+        }
+
+        return status(415, { message: AVATAR_UNSUPPORTED })
+      }
+
+      let swapped: Awaited<ReturnType<typeof swapAvatarKey>>
+
+      try {
+        swapped = await swapAvatarKey(userId, received.avatarKey)
+      } catch (error) {
+        await removeAvatarFile(received.avatarKey)
+
+        throw error
+      }
+
+      // Пользователя удалили между guard'ом и транзакцией: та же мёртвая
+      // сессия, а новый файл — уже ничей.
+      if (!swapped) {
+        await removeAvatarFile(received.avatarKey)
+
+        return status(401, UNAUTHORIZED)
+      }
+
+      // После коммита: до него строка ещё указывала на прежний файл. Файл без
+      // строки безвреден (отдача ищет строку раньше диска), строка без файла —
+      // битая картинка.
+      if (swapped.previousKey !== null) {
+        await removeAvatarFile(swapped.previousKey)
+      }
+
+      return toPublicUser(swapped.user)
+    },
+    {
+      // Тело не парсится: `request.body` остаётся нетронутым потоком, который
+      // `writeBody` сливает на диск. Multipart Elysia разобрал бы в память до
+      // обработчика, а потолок тела у Bun — 64 ГиБ.
+      parse: 'none',
+      response: {
+        200: userResponse,
+        400: messageResponse,
+        401: messageResponse,
+        413: messageResponse,
+        415: messageResponse,
+      },
+      detail: {
+        summary: 'Upload or replace the avatar of the current user',
+        description:
+          'Тело — сами байты JPEG, PNG или WebP до 2 МБ, без multipart. Формат ' +
+          'определяется по содержимому; `Content-Type` и имя файла не учитываются.',
+        security,
+      },
+    },
+  )
+  .delete(
+    '/me/avatar',
+    async ({ userId, status }) => {
+      // Сначала строка, потом диск, как у файлов встречи: файл без строки
+      // безвреден — отдача ищет строку раньше диска, и старый адрес отвечает
+      // 404 сразу после коммита, — а строка без файла дала бы битую картинку.
+      const swapped = await swapAvatarKey(userId, null)
+
+      if (!swapped) {
+        return status(401, UNAUTHORIZED)
+      }
+
+      // Аватара не было — удалять нечего, и это не ошибка: второй клик или
+      // вкладка, где его уже удалили, хотели ровно этого.
+      if (swapped.previousKey !== null) {
+        await removeAvatarFile(swapped.previousKey)
+      }
+
+      return toPublicUser(swapped.user)
+    },
+    {
+      response: {
+        200: userResponse,
+        401: messageResponse,
+      },
+      detail: { summary: 'Delete the avatar of the current user', security },
+    },
+  )
 
 export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .use(jwtPlugin)
@@ -114,10 +457,10 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       try {
         const user = await prisma.user.create({
           data: { email, passwordHash: await Bun.password.hash(body.password) },
-          select: { id: true, email: true },
+          select: { id: true, email: true, tokenVersion: true },
         })
 
-        return status(201, { token: await jwt.sign({ sub: user.id, email: user.email }) })
+        return status(201, { token: await jwt.sign(sessionClaims(user)) })
       } catch (error) {
         // Проверять занятость отдельным SELECT'ом бессмысленно: между ним и
         // вставкой всё равно есть окно, а unique-индекс закрывает его сам.
@@ -151,7 +494,7 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
         return status(401, INVALID_CREDENTIALS)
       }
 
-      return { token: await jwt.sign({ sub: user.id, email: user.email }) }
+      return { token: await jwt.sign(sessionClaims(user)) }
     },
     {
       body: credentials,

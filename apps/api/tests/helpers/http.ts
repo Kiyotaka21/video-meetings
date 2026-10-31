@@ -46,6 +46,13 @@ export const postJson = (path: string, payload: unknown, token?: string): Promis
     body: JSON.stringify(payload),
   })
 
+export const patchJson = (path: string, payload: unknown, token?: string): Promise<ApiResponse> =>
+  request(path, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', ...authorization(token) },
+    body: JSON.stringify(payload),
+  })
+
 export const getJson = (path: string, token?: string): Promise<ApiResponse> =>
   request(path, { method: 'GET', headers: authorization(token) })
 

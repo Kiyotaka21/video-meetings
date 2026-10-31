@@ -40,10 +40,11 @@ export const apiMessageOf = (error: unknown): string | undefined => {
 }
 
 /**
- * Api не принял токен: истёк, выпущен против другой базы или учётку удалили.
- * Все три случая приезжают одним 401 — намеренно, см. `authenticated` и
- * `GET /auth/me` в `apps/api/src/modules/auth.ts`. Поэтому и обработка одна:
- * сессии больше нет, надо выйти и увести на `/login`.
+ * Api не принял токен: истёк, выпущен против другой базы, учётку удалили или
+ * токен отозван сменой пароля. Все случаи приезжают одним 401 — намеренно, см.
+ * `authenticated` и `GET /auth/me` в `apps/api/src/modules/auth.ts`. Поэтому и
+ * обработка одна — `handleUnauthorized` в `useAuth`: выйти и увести на
+ * `/login`, если только соседняя вкладка не положила в куку новый токен.
  */
 export const isUnauthorized = (error: unknown): boolean => statusOf(error) === 401
 

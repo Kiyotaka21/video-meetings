@@ -59,6 +59,11 @@ Thumbs.db
 # при каждом вызове браузера.
 .playwright-mcp/
 
+# Состояние и лог Ralph-цикла (.claude/hooks/stop.mjs): пишутся при каждом шаге
+# цикла и у каждой машины свои.
+.claude/ralph.iterations.json
+.claude/ralph.log
+
 # Клиент Prisma генерируется из схемы (bun run db:generate)
 apps/api/generated/
 

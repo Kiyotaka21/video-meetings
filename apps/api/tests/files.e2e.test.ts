@@ -23,6 +23,7 @@ import {
   storedFiles,
 } from './helpers/files'
 import { deleteJson, getJson, postFile, request, type ApiResponse } from './helpers/http'
+import { waitForLockWaiter } from './helpers/locks'
 import { registerUser } from './helpers/users'
 
 /**
@@ -42,28 +43,6 @@ const document = (name = 'Отчёт за квартал.pdf') => ({
   type: 'application/pdf',
   body: DOCUMENT_TEXT,
 })
-
-/**
- * Ждёт, пока какой-нибудь запрос в нашей базе встанет в очередь за замком.
- * Опрашиваем `pg_stat_activity`, а не спим наугад: на медленной машине «100 мс»
- * не хватит, и тест на гонку молча перестанет её проверять. Тестовые файлы
- * `bun test` гоняет по очереди, так что чужих ожидающих здесь не бывает.
- */
-const waitForLockWaiter = async (): Promise<void> => {
-  for (let attempt = 0; attempt < 250; attempt += 1) {
-    const [row] = await prisma.$queryRaw<Array<{ waiting: number }>>`
-      SELECT count(*)::int AS waiting FROM pg_stat_activity
-      WHERE wait_event_type = 'Lock' AND datname = current_database()`
-
-    if ((row?.waiting ?? 0) > 0) {
-      return
-    }
-
-    await Bun.sleep(20)
-  }
-
-  throw new Error('Загрузка так и не встала в очередь за замком на встрече')
-}
 
 const uploadDocument = async (meetingId: string, token: string, name?: string) =>
   asFile((await postFile(filesPath(meetingId), document(name), token)).body)

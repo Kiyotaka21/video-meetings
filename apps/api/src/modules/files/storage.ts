@@ -1,5 +1,5 @@
 import { rm, unlink } from 'node:fs/promises'
-import { isAbsolute, join, relative } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 
 import { env } from '../../config/env'
 
@@ -7,7 +7,18 @@ import { env } from '../../config/env'
  * Всё, что касается диска: где лежат файлы встречи, как в них пишется тело
  * запроса и как они убираются. Путь целиком генерирует api — исходное имя файла
  * сюда не доезжает ни в каком виде.
+ *
+ * Запись тела и проверку пути внутри `UPLOAD_DIR` переиспользует аватар
+ * (`../avatars/storage.ts`): его файлы лежат в том же `UPLOAD_DIR`, рядом с
+ * каталогами встреч.
  */
+
+/**
+ * Каталог аватаров внутри `UPLOAD_DIR`. Имя объявлено здесь, а не рядом с
+ * аватаром: раскладку `UPLOAD_DIR` знает этот файл, и `meetingDirectory` обязан
+ * его обходить.
+ */
+export const AVATARS_DIRECTORY = 'avatars'
 
 /** 1 МиБ: столько же, сколько в замере памяти из ресерча. */
 const HIGH_WATER_MARK = 1024 * 1024
@@ -31,15 +42,31 @@ export const writeBody = async (
 
   try {
     if (body) {
-      for await (const chunk of body) {
+      // Читатель руками, а не `for await`, и без `releaseLock()`. На Bun
+      // 1.3.14 `releaseLock()` у читателя тела запроса, дочитанного до конца,
+      // через раз бросает «TypeError: undefined is not a function» — а
+      // встроенный async-итератор зовёт его в своём `finally`. Вживую это
+      // ронял каждый второй `PUT /auth/me/avatar` пятисоткой; через
+      // `app.handle` не воспроизводится. Отпускать замок незачем: тело больше
+      // никто не читает (ловушка в `apps/api/CLAUDE.md`).
+      const reader = body.getReader()
+
+      for (;;) {
+        const { done, value: chunk } = await reader.read()
+
+        if (done) {
+          break
+        }
+
         size += chunk.byteLength
 
         // Счётчик обязателен и при проверенном `Content-Length`: заголовок
         // присылает клиент, и он может соврать или не прислать его вовсе.
-        // Лишний чанк на диск не уходит, а выход из цикла отменяет поток —
-        // остаток тела не читается.
+        // Лишний чанк на диск не уходит, а отмена потока не даёт читать
+        // остаток тела.
         if (size > maxSize) {
           tooLarge = true
+          await reader.cancel().catch(() => {})
           break
         }
 
@@ -86,7 +113,7 @@ const isInsideUploadDir = (target: string): boolean => {
  * Абсолютный путь внутри `UPLOAD_DIR`. Выход за его пределы — не ошибка
  * клиента, а сломанный инвариант в нашем коде, поэтому исключение, а не 4xx.
  */
-const insideUploadDir = (...segments: string[]): string => {
+export const insideUploadDir = (...segments: string[]): string => {
   const target = join(env.uploadDir, ...segments)
 
   if (!isInsideUploadDir(target)) {
@@ -96,8 +123,25 @@ const insideUploadDir = (...segments: string[]): string => {
   return target
 }
 
-/** Каталог встречи: `<UPLOAD_DIR>/<id встречи>`. */
-export const meetingDirectory = (meetingId: string): string => insideUploadDir(meetingId)
+/**
+ * Каталог встречи: `<UPLOAD_DIR>/<id встречи>` — прямой потомок `UPLOAD_DIR`,
+ * но не каталог аватаров. Id встречи — uuid и с `avatars` не совпадёт, но
+ * кривой аргумент превратил бы `removeMeetingFiles` в `rm -rf` аватаров всех
+ * пользователей, а вложенный путь — в удаление одного чужого файла. Регистр не
+ * учитывается: на Windows `Avatars` — тот же каталог.
+ */
+export const meetingDirectory = (meetingId: string): string => {
+  const directory = insideUploadDir(meetingId)
+
+  if (
+    dirname(directory) !== env.uploadDir ||
+    basename(directory).toLowerCase() === AVATARS_DIRECTORY
+  ) {
+    throw new Error(`Это не каталог встречи: ${directory}`)
+  }
+
+  return directory
+}
 
 /**
  * Абсолютный путь по относительному из метаданных. В базе он всегда со слэшем
@@ -124,8 +168,9 @@ export const removeStoredFile = async (relativePath: string): Promise<void> => {
  * каскад в базе убирает строки файлов, но не сами файлы, и без этого вызова
  * каталоги остаются на диске навсегда.
  *
- * `meetingDirectory` отказывается от пустого id и от `..`: иначе кривой
- * аргумент превратился бы в `rm -rf UPLOAD_DIR`.
+ * `meetingDirectory` отказывается от пустого id, от `..` и от каталога
+ * аватаров: иначе кривой аргумент превратился бы в `rm -rf UPLOAD_DIR` или в
+ * удаление аватаров всех пользователей.
  */
 export const removeMeetingFiles = async (meetingId: string): Promise<void> => {
   await rm(meetingDirectory(meetingId), { recursive: true, force: true })
