@@ -282,7 +282,8 @@ bun run --filter @video-meetings/web postinstall
 | `app/composables/useAuth.ts`                   | кука с токеном, общий `user`, `/auth/*`, `handleUnauthorized` — разбор 401 на всех страницах за авторизацией                |
 | `app/composables/useMeetings.ts`               | `GET /meetings` и `GET /meetings/:id`                                                                                       |
 | `app/middleware/auth.ts`                       | guard приватных страниц                                                                                                     |
-| `app/utils/api.ts`                             | `statusOf`, `isUnauthorized`, текст «нет связи»                                                                             |
+| `app/types/auth.ts`                            | контракт `/auth/*` на клиенте: `AuthUser` (`id`, `email`, `name`, `avatarUrl`), тела запросов, отказы по полю               |
+| `app/utils/api.ts`                             | `statusOf`, `apiMessageOf`, `isUnauthorized`, `apiHref`, текст «нет связи»                                                  |
 | `app/utils/auth.ts`                            | границы полей, проверка формы смены пароля и разбор отказов `/auth/*`                                                       |
 | `app/utils/meetings.ts`                        | разбивка на блоки, формат даты, множественные формы                                                                         |
 | `app/utils/profile.ts`                         | копия правил имени и лимитов аватара с api, тексты ошибок, разбор отказов профиля                                           |
@@ -321,9 +322,10 @@ bun run --filter @video-meetings/web postinstall
 - **Токен лежит в куке `auth_token`, а не в `localStorage`.** Куку видит и сервер,
   поэтому middleware отбивает неавторизованного до рендера. `maxAge` — 7 дней,
   ровно как `JWT_EXPIRES_IN` на api: меняешь там — меняй здесь.
-- **Адрес вошедшего берётся у `GET /auth/me`, а не из payload'а токена.**
-  Раскодировать JWT на клиенте можно, но форма payload'а не зафиксирована
-  контрактом, а подпись без секрета всё равно не проверить. Проверено в браузере:
+- **Адрес, имя и аватар вошедшего берутся у `GET /auth/me`, а не из payload'а
+  токена.** Раскодировать JWT на клиенте можно, но подпись без секрета не
+  проверить, а токен — снимок на момент выпуска: имени и аватара в нём нет, и
+  их правка до него не доезжает, пока токен не перевыпустят. Проверено в браузере:
   вход под `ORGANIZER@example.com` показывает в кабинете `organizer@example.com` —
   адрес пришёл из базы нормализованным, а не из формы.
 - **`user` держится в `useState`, а не в локальном ref композабла.** `useAuth()`

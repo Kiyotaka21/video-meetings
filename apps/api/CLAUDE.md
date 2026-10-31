@@ -32,7 +32,8 @@ cd apps/api && bun run db:migrate                # prisma migrate dev
 Контракты всех доменов целиком описаны тестами — `tests/auth.e2e.test.ts`,
 `tests/password.e2e.test.ts` (смена пароля, версия токена и отзыв сессий),
 `tests/avatar.e2e.test.ts`, `tests/meetings.e2e.test.ts`,
-`tests/files.e2e.test.ts` и `tests/file-content.e2e.test.ts` (отдача файла). Коды ответов, нормализация
+`tests/files.e2e.test.ts`, `tests/file-content.e2e.test.ts` (отдача файла) и
+`tests/file-delete.e2e.test.ts`. Коды ответов, нормализация
 данных и содержимое токенов меняются там же, а не только в коде.
 
 ## Загрузка файлов встречи: сначала ресерч, потом код
@@ -568,6 +569,7 @@ src/db/prisma.ts           единственный инстанс PrismaClient
 tests/setup.ts            preload: фиксирует окружение до импорта приложения
 tests/helpers/http.ts     обёртка над app.handle, сырой ответ для отдачи файла
 tests/helpers/jwt.ts      разбор и выпуск JWT без зависимостей
+tests/helpers/users.ts    уникальный адрес и регистрация пользователя с токеном
 tests/helpers/files.ts    встреча, контракт полей файла, что лежит на диске
 tests/helpers/avatars.ts  загрузка аватара, форма ответа о пользователе, каталог avatars/
 tests/helpers/images.ts   минимальные JPEG, PNG, WebP и чужие форматы — собраны в коде
@@ -738,6 +740,7 @@ Elysia отдать такой ответ из guard'а.
 
 | Переменная              | Дефолт                  | Кто читает                                                                      |
 | ----------------------- | ----------------------- | ------------------------------------------------------------------------------- |
+| `NODE_ENV`              | `development`           | `app.ts` через `isProduction`: `production` выключает `/docs` и `/docs/json`    |
 | `PORT`, `HOST`          | `3000`, `0.0.0.0`       | `src/index.ts`                                                                  |
 | `CORS_ORIGINS`          | `http://localhost:5173` | `app.ts` через `env.corsOrigins`                                                |
 | `DATABASE_URL`          | нет                     | `src/db/prisma.ts` и Prisma CLI                                                 |

@@ -210,7 +210,7 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
 │   └── web                 # Nuxt 4
 │       ├── app             # srcDir Nuxt 4
 │       │   ├── assets/css
-│       │   ├── components  # auth/, dashboard/, meetings/, files/
+│       │   ├── components  # auth/, dashboard/, meetings/, files/, profile/
 │       │   ├── composables # токен, запросы к api, загрузка файла и свежие ссылки
 │       │   ├── layouts
 │       │   ├── middleware  # auth: guard приватных страниц
@@ -274,8 +274,8 @@ open http://localhost:3000/docs
 ```
 
 Регистрация и логин. Оба маршрута принимают `{ email, password }` и возвращают
-`{ token }` — JWT (HS256) с `sub` = id пользователя и `ver` — версией сессий,
-которую поднимает смена пароля:
+`{ token }` — JWT (HS256) с `sub` = id пользователя, `email` и `ver` — версией
+сессий, которую поднимает смена пароля:
 
 ```bash
 curl -X POST http://localhost:3000/auth/register \

@@ -28,9 +28,10 @@ export interface PasswordChange {
 }
 
 /**
- * Ответ `GET /auth/me`. Читается из базы по `sub` из токена, а не из самого
- * токена: payload JWT контрактом не зафиксирован, а этот маршрут — зафиксирован
- * тестом `tests/auth.e2e.test.ts`.
+ * Ответ `GET /auth/me` — и `PATCH /auth/me`, `PUT` и `DELETE /auth/me/avatar`.
+ * Читается из базы по `sub` из токена, а не из самого токена: тот — снимок на
+ * момент выпуска, без имени и аватара. Форма ответа зафиксирована тестами
+ * `tests/auth.e2e.test.ts` и `tests/avatar.e2e.test.ts`.
  */
 export interface AuthUser {
   id: string
