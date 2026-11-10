@@ -25,8 +25,12 @@ bun run db:up          # Postgres в контейнере, дефолты заш
 bun run db:migrate     # накатить схему (users, meetings, meeting_files)
 ```
 
-В `apps/api/.env` обязательно задать свой `JWT_SECRET` — дефолта у него нет, без
-него api не стартует. Сгенерировать: `openssl rand -base64 48`.
+В `apps/api/.env` обязательно вписать свой `JWT_SECRET`: в примере он пустой, и
+без него api не стартует. Сгенерировать: `openssl rand -base64 48` (или
+`bun -e "console.log(crypto.randomBytes(48).toString('base64'))"`, если `openssl`
+нет). Секрет короче 32 байт и значение `change-me-in-your-own-env` из старых копий
+примера api тоже отвергает на старте: секрет из репозитория известен всем, и с ним
+подделывается токен любого пользователя.
 
 Корневой `.env` нужен только чтобы переопределить креды или порт Postgres —
 смотри `.env.example` в корне.
@@ -74,13 +78,17 @@ Postgres 18 (`postgres:18-alpine`) в контейнере из корневог
 
 | Параметр              | Значение по умолчанию               |
 | --------------------- | ----------------------------------- |
-| хост:порт             | `localhost:5432`                    |
+| хост:порт             | `127.0.0.1:5432` (только loopback)  |
 | база                  | `video_meetings`                    |
 | пользователь / пароль | `video_meetings` / `video_meetings` |
 
 ```
-postgresql://video_meetings:video_meetings@localhost:5432/video_meetings
+postgresql://video_meetings:video_meetings@127.0.0.1:5432/video_meetings
 ```
+
+Порт опубликован только на `127.0.0.1`: пароль по умолчанию лежит в репозитории, и
+на всех интерфейсах база была бы открыта любому в той же сети. Поэтому и в строке
+подключения `127.0.0.1`, а не `localhost` — тот на части систем резолвится в `::1`.
 
 ```bash
 bun run db:up                                            # поднять и дождаться готовности
@@ -153,7 +161,13 @@ pre-commit-хук husky запускает: перед каждым коммит
 | `auth.e2e.test.ts`         | регистрация, логин и `/auth/me`: коды ответов, нормализация e-mail, содержимое JWT, правка имени   |
 | `password.e2e.test.ts`     | смена пароля (403, 400, 422) и отзыв сессий: старые токены и край в одну секунду — 401             |
 | `avatar.e2e.test.ts`       | аватар: три формата, 415 по содержимому, 413, замена под замком, удаление, отдача без токена и 404 |
-| `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат                                |
+| `meetings.e2e.test.ts`     | встречи: guard по токену, изоляция между пользователями, формат дат, страницы и курсор списка      |
+| `cors.e2e.test.ts`         | CORS на отказах (401, 422, 413, 415), preflight загрузки и его кэш, `/health`                      |
+| `body-limit.e2e.test.ts`   | потолок тела JSON (413, 411), потоковые маршруты вне его, общий 500 без текста ошибки              |
+| `rate-limit.e2e.test.ts`   | перебор пароля: 429 у входа и смены пароля, обнуление счётчика, сам счётчик                        |
+| `quotas.e2e.test.ts`       | квота 20 ГБ на пользователя с гонкой под замком, три загрузки «в пути», 1000 встреч                |
+| `env.test.ts`              | окружение в отдельном процессе: отказ слабого `JWT_SECRET`, дефолты, `/docs` в production          |
+| `live.e2e.test.ts`         | живой сервер на случайном порту: `Content-Length` у отдачи, потолок по IP, chunked-тело            |
 | `files.e2e.test.ts`        | файлы встречи: загрузка потоком, метаданные, список, лимиты (415, 413, 409), чужая встреча и 401   |
 | `file-content.e2e.test.ts` | отдача по ссылке: `Range` побайтово, `Content-Disposition`, кто открывает файл (401/404)           |
 | `file-delete.e2e.test.ts`  | удаление файла: 204, 404 на повтор и чужое, старая ссылка 404, уборка каталога встречи             |
@@ -244,11 +258,13 @@ grep -o '<title>[^<]*' apps/web/.output/public/pricing/index.html
   `apps/web/app/app.config.ts`, токены в `apps/web/app/assets/css/main.css`. В разметке
   только семантические цвета (`text-muted`, `bg-elevated`), не raw-палитра Tailwind.
   Классы сортирует `prettier-plugin-tailwindcss`.
-- **Elysia-плагины** — `@elysiajs/cors` (origin'ы из `CORS_ORIGINS`, `credentials: true`),
-  `@elysiajs/openapi` (Scalar UI на `/docs`, спека на `/docs/json`; выключен при
-  `NODE_ENV=production`) и `@elysiajs/jwt` — два инстанса: сессионный (HS256 секретом `JWT_SECRET`, срок
-  из `JWT_EXPIRES_IN`) и файловые ссылки (секрет выведен из `JWT_SECRET`, срок из
-  `FILE_LINK_EXPIRES_IN`).
+- **Elysia-плагины** — `@elysiajs/cors` (origin'ы из `CORS_ORIGINS`, `credentials: true`,
+  preflight кэшируется на 2 часа), `@elysiajs/openapi` (Scalar UI на `/docs`, спека на
+  `/docs/json`; выключен при `NODE_ENV=production`) и `@elysiajs/jwt` — два инстанса:
+  сессионный (HS256 секретом `JWT_SECRET`, срок из `JWT_EXPIRES_IN`) и файловые ссылки
+  (секрет выведен из `JWT_SECRET`, срок из `FILE_LINK_EXPIRES_IN`). Свои сквозные
+  плагины — в `apps/api/src/plugins/`: потолок тела JSON-маршрутов (64 КиБ, 411 без
+  `Content-Length`) и общий 500 без текста ошибки вместо сообщения Prisma.
 - **Prisma 7** — ORM для Postgres. У семёрки нет Rust-движка, поэтому клиент ходит в
   базу через драйверный адаптер `@prisma/adapter-pg`, а `DATABASE_URL` задаётся в
   `apps/api/prisma.config.ts`, а не в блоке `datasource`. CLI запускается как

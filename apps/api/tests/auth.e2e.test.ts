@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'bun:test'
 
 import { getJson, patchJson, postJson } from './helpers/http'
+import { resignedGenuine, SESSION_FORGERIES } from './helpers/forgeries'
 import { decodeJwt, signJwt } from './helpers/jwt'
 import { registerUser, uniqueEmail } from './helpers/users'
 import { TEST_JWT_SECRET } from './setup'
@@ -82,20 +83,9 @@ const invalidCredentials: Array<[string, unknown]> = [
   ['e-mail не строка', { email: 42, password: PASSWORD }],
 ]
 
-/**
- * Токены, которые обязан отбить guard. Набор один на GET и PATCH `/auth/me`:
- * без проверки `sub` в guard'е токен без него дошёл бы до `update` с
- * `id: undefined` и вместо 401 получил бы 500.
- */
-const rejectedTokens: Array<[string, string]> = [
-  ['мусор вместо токена', 'not-a-jwt-at-all'],
-  [
-    'подпись чужим секретом',
-    signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
-  ],
-  ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
-  ['подпись нашим секретом, но без sub', signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
-]
+// Токены, которые обязан отбить guard, — `SESSION_FORGERIES`, один набор на GET
+// и PATCH `/auth/me`. Без проверки `sub` в guard'е токен без него дошёл бы до
+// `update` с `id: undefined` и вместо 401 получил бы 500.
 
 describe('POST /auth/register', () => {
   it('создаёт пользователя и возвращает JWT', async () => {
@@ -320,14 +310,25 @@ describe('GET /auth/me', () => {
     expect(response.body).not.toHaveProperty('email')
   })
 
-  for (const [name, token] of rejectedTokens) {
+  for (const [name, forge] of SESSION_FORGERIES) {
     it(`отклоняет: ${name}`, async () => {
-      const response = await getJson(ME, token)
+      const user = await registerUser()
+
+      const response = await getJson(ME, forge(user.token))
 
       expect(response.status).toBe(401)
       expect(response.body).not.toHaveProperty('email')
     })
   }
+
+  it('контроль к подделкам: те же claims с нашей подписью проходят', async () => {
+    const user = await registerUser()
+
+    const response = await getJson(ME, resignedGenuine(user.token))
+
+    expect(response.status).toBe(200)
+    expect((response.body as { email: string }).email).toBe(user.email)
+  })
 
   it('годная подпись, но такого пользователя нет → 401, а не 404', async () => {
     // Подпись наша, `sub` формата uuid — guard такой токен пропускает. Для
@@ -462,14 +463,24 @@ describe('PATCH /auth/me', () => {
     expect(response.body).not.toHaveProperty('name')
   })
 
-  for (const [name, token] of rejectedTokens) {
+  for (const [name, forge] of SESSION_FORGERIES) {
     it(`отклоняет: ${name} → 401`, async () => {
-      const response = await patchJson(ME, { name: NAME }, token)
+      const user = await registerUser()
+
+      const response = await patchJson(ME, { name: NAME }, forge(user.token))
 
       expect(response.status).toBe(401)
       expect(response.body).not.toHaveProperty('name')
     })
   }
+
+  it('контроль к подделкам: те же claims с нашей подписью правят имя', async () => {
+    const user = await registerUser()
+
+    const response = await patchJson(ME, { name: NAME }, resignedGenuine(user.token))
+
+    expect(response.status).toBe(200)
+  })
 
   it('годная подпись, но такого пользователя нет → 401, а не 404 и не 500', async () => {
     // `update` по несуществующей строке бросает P2025; наружу это та же

@@ -30,6 +30,13 @@ export const signJwt = (payload: Record<string, unknown>, secret: string): strin
   return `${header}.${body}.${signature}`
 }
 
+/**
+ * Токен с `alg: none` и пустой подписью — классическая подмена алгоритма:
+ * библиотека, которая верит заголовку, примет его без секрета.
+ */
+export const unsignedJwt = (payload: Record<string, unknown>): string =>
+  `${encodeSegment({ alg: 'none', typ: 'JWT' })}.${encodeSegment(payload)}.`
+
 const decodeSegment = (segment: string): Record<string, unknown> => {
   const json = Buffer.from(segment, 'base64url').toString('utf8')
   const value: unknown = JSON.parse(json)

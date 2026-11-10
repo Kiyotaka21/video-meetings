@@ -1,44 +1,20 @@
-import type { Meeting } from '~/types/meetings'
 import { NO_CONNECTION_MESSAGE, statusOf } from '~/utils/api'
 
-/** Сколько прошедших встреч показывает блок «Последние встречи». */
+/**
+ * Сколько прошедших встреч показывает блок «Последние встречи». Это и `limit`
+ * запроса `scope=past`: api отдаёт ровно столько, самые свежие первыми.
+ */
 export const RECENT_MEETINGS_LIMIT = 3
+
+/**
+ * Размер страницы предстоящих встреч — и первой, и каждой по «Показать ещё».
+ * Api принимает до 100; 20 строк — экран-два, дальше листать списком дольше,
+ * чем дождаться следующей страницы.
+ */
+export const UPCOMING_PAGE_SIZE = 20
 
 /** Сколько адресов участников видно в строке встречи до сворачивания в «+N». */
 export const PARTICIPANTS_PREVIEW_LIMIT = 3
-
-export interface SplitMeetings {
-  /** Ещё не состоявшиеся, ближайшая первой. */
-  upcoming: Meeting[]
-  /** Уже прошедшие, самая свежая первой, не больше `RECENT_MEETINGS_LIMIT`. */
-  recent: Meeting[]
-}
-
-/**
- * Делит список по «сейчас».
- *
- * Полагается на то, что api отдаёт встречи по возрастанию `date` — это его
- * контракт, зафиксированный в `apps/api/tests/meetings.e2e.test.ts`, поэтому
- * предстоящие остаются в исходном порядке и досортировывать их незачем: вторая
- * сортировка стала бы вторым источником правды о порядке. Прошедшие
- * переворачиваем — «последние» значит недавние, а не самые старые.
- *
- * `now` параметром, а не `Date.now()` внутри: иначе функцию не проверить.
- */
-export const splitMeetings = (meetings: Meeting[], now: number = Date.now()): SplitMeetings => {
-  const upcoming: Meeting[] = []
-  const past: Meeting[] = []
-
-  for (const meeting of meetings) {
-    if (Date.parse(meeting.date) >= now) {
-      upcoming.push(meeting)
-    } else {
-      past.push(meeting)
-    }
-  }
-
-  return { upcoming, recent: past.reverse().slice(0, RECENT_MEETINGS_LIMIT) }
-}
 
 /**
  * `Intl.DateTimeFormat` собирается один раз: конструктор заметно дороже самого
@@ -101,6 +77,21 @@ export const describeMeetingsFailure = (error: unknown): string => {
       return NO_CONNECTION_MESSAGE
     default:
       return 'Не удалось загрузить встречи. Попробуйте обновить список.'
+  }
+}
+
+/**
+ * Отказ догрузки по «Показать ещё». Уже показанные встречи остаются на месте,
+ * поэтому текст — про следующую страницу, а не про список целиком. 400 на
+ * курсор отдельно не разбирается: курсор приходит от api и уходит обратно как
+ * есть, так что такой отказ — разъезд версий, а не ошибка пользователя.
+ */
+export const describeMoreMeetingsFailure = (error: unknown): string => {
+  switch (statusOf(error)) {
+    case undefined:
+      return NO_CONNECTION_MESSAGE
+    default:
+      return 'Не удалось загрузить ещё встречи. Попробуйте ещё раз.'
   }
 }
 

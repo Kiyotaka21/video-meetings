@@ -11,8 +11,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-video_meetings}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-video_meetings}
       POSTGRES_DB: ${POSTGRES_DB:-video_meetings}
+    # Только на loopback: пароль по умолчанию лежит в репозитории, и порт на
+    # всех интерфейсах открывал бы базу (хеши паролей, `token_version`) любому
+    # в той же сети — офис, коворкинг, кафе. Приложения ходят на 127.0.0.1.
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     # В postgres:18 PGDATA переехал в /var/lib/postgresql/18/docker, а образ
     # объявляет VOLUME на /var/lib/postgresql — том вешается на родителя, иначе
     # анонимный том перекрыл бы данные при пересоздании контейнера.

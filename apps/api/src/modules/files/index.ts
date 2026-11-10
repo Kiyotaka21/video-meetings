@@ -6,15 +6,21 @@ import { Elysia, t } from 'elysia'
 import type { Prisma } from '../../../generated/prisma/client'
 import type { FileKind, FileStatus } from '../../../generated/prisma/enums'
 import { prisma } from '../../db/prisma'
+import { isUuid } from '../../lib/ids'
+import { BIDI_CONTROLS, CONTROL_CHARACTERS } from '../../lib/text'
 import { authenticated } from '../auth'
 import { fileContentRoutes } from './content'
 import {
   acceptsDeclaredType,
   type FileFormat,
   FORMATS,
+  MAX_CONCURRENT_UPLOADS,
   MAX_FILES_PER_MEETING,
   SIZE_LIMITS,
+  STORAGE_QUOTA,
+  STORAGE_QUOTA_EXCEEDED,
   TOO_MANY_FILES,
+  TOO_MANY_UPLOADS,
 } from './limits'
 import { contentPath, fileLinkJwt } from './link'
 import { meetingDirectory, removeStoredFile, storedPath, writeBody } from './storage'
@@ -97,12 +103,20 @@ const toResponse = async (file: MeetingFileRow, meetingId: string, signLink: Sig
 const MAX_NAME_LENGTH = 255
 
 /**
+ * Чего не бывает в честном имени файла: управляющие символы и управление
+ * направлением текста. NUL Postgres в тексте не принимает — вставка падала
+ * пятисоткой уже после записи всего тела, — а bidi-символы подделывают видимое
+ * имя в списке и у скачанного файла.
+ */
+const FORBIDDEN_IN_NAME = new RegExp(`[${CONTROL_CHARACTERS}${BIDI_CONTROLS}]`)
+
+/**
  * Имя приезжает percent-encoded: значение HTTP-заголовка — это байты Latin-1, и
  * кириллица в него не помещается ни на клиенте, ни на сервере (обе стороны
  * бросают исключение). Контракт — `encodeURIComponent` в браузере и разбор тут.
  *
- * `null` вместо исключения: битая строка (`%zz`, одиночный `%`) — ошибка
- * клиента, то есть 400, а не 500.
+ * `null` вместо исключения: битая строка (`%zz`, одиночный `%`) и запрещённые
+ * символы — ошибка клиента, то есть 400, а не 500. Проверка — до записи тела.
  */
 const decodeFileName = (header: string | undefined): string | null => {
   if (!header) {
@@ -114,6 +128,10 @@ const decodeFileName = (header: string | undefined): string | null => {
   try {
     decoded = decodeURIComponent(header)
   } catch {
+    return null
+  }
+
+  if (FORBIDDEN_IN_NAME.test(decoded)) {
     return null
   }
 
@@ -169,34 +187,89 @@ const checkFormat = (name: string, contentType: string | undefined): FormatCheck
   return { ok: true, extension, format }
 }
 
+/** Сколько байт занимают файлы всех встреч пользователя — то, что меряет квота. */
+const usedBytes = async (
+  db: Pick<Prisma.TransactionClient, 'meetingFile'>,
+  userId: string,
+): Promise<bigint> => {
+  const { _sum } = await db.meetingFile.aggregate({
+    _sum: { size: true },
+    where: { meeting: { ownerId: userId } },
+  })
+
+  return _sum.size ?? 0n
+}
+
 /**
- * Вставляет строку файла, если во встрече есть место, — иначе `null`.
+ * Вставляет строку файла, если во встрече есть место и квота пользователя не
+ * кончилась, — иначе отдаёт текст отказа.
  *
  * Одной транзакции мало (ресерч, 2.6): в Postgres по умолчанию READ COMMITTED, и
  * `count` внутри неё ничего не блокирует — два параллельных запроса оба насчитают
- * 19 и оба вставят двадцатый. Замок на строке встречи сериализует их: второй
- * ждёт на `FOR UPDATE`, пока первый не закоммитит вставку, и уже видит её в
- * своём счёте. Тест на гонку без замка краснеет — проверено.
+ * 19 и оба вставят двадцатый. Замки сериализуют их: второй ждёт на
+ * `FOR UPDATE`, пока первый не закоммитит вставку, и уже видит её в своём
+ * счёте. Замок на встрече — для числа файлов в ней, на пользователе — для
+ * квоты: файлы одного человека лежат в разных встречах, и замок встречи гонку
+ * за последние байты не остановил бы. Порядок — пользователь, потом встреча:
+ * у всех, кто берёт оба, он один, иначе две загрузки сцепились бы намертво.
+ * Тесты на обе гонки без своего замка краснеют — проверено.
  */
-const createWithinLimit = (data: Prisma.MeetingFileUncheckedCreateInput) =>
+const createWithinLimits = (userId: string, data: Prisma.MeetingFileUncheckedCreateInput) =>
   prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`
     await tx.$queryRaw`SELECT id FROM meetings WHERE id = ${data.meetingId} FOR UPDATE`
 
     const count = await tx.meetingFile.count({ where: { meetingId: data.meetingId } })
 
     if (count >= MAX_FILES_PER_MEETING) {
-      return null
+      return { ok: false, message: TOO_MANY_FILES } as const
     }
 
-    return tx.meetingFile.create({ data, select: publicFields })
+    if ((await usedBytes(tx, userId)) + BigInt(data.size) > BigInt(STORAGE_QUOTA)) {
+      return { ok: false, message: STORAGE_QUOTA_EXCEEDED } as const
+    }
+
+    return { ok: true, file: await tx.meetingFile.create({ data, select: publicFields }) } as const
   })
 
 /**
- * Владелец в `where`, а не проверка после выборки: чужая встреча не находится
- * вовсе и отвечает тем же 404, что и несуществующая.
+ * Загрузки «в пути» по пользователям — в памяти процесса, как и счётчики
+ * перебора в `auth.ts`: api — один процесс. Занимается до записи тела,
+ * освобождается в `finally`, что бы с загрузкой ни случилось.
  */
-const findOwnMeeting = (meetingId: string, userId: string) =>
-  prisma.meeting.findFirst({ where: { id: meetingId, ownerId: userId }, select: { id: true } })
+const activeUploads = new Map<string, number>()
+
+const startUpload = (userId: string): boolean => {
+  const active = activeUploads.get(userId) ?? 0
+
+  if (active >= MAX_CONCURRENT_UPLOADS) {
+    return false
+  }
+
+  activeUploads.set(userId, active + 1)
+
+  return true
+}
+
+const finishUpload = (userId: string): void => {
+  const active = (activeUploads.get(userId) ?? 1) - 1
+
+  if (active > 0) {
+    activeUploads.set(userId, active)
+  } else {
+    activeUploads.delete(userId)
+  }
+}
+
+/**
+ * Владелец в `where`, а не проверка после выборки: чужая встреча не находится
+ * вовсе и отвечает тем же 404, что и несуществующая. Id не в формате uuid до
+ * базы не доходит (`isUuid`): `%00` в пути ронял запрос пятисоткой.
+ */
+const findOwnMeeting = async (meetingId: string, userId: string) =>
+  isUuid(meetingId)
+    ? prisma.meeting.findFirst({ where: { id: meetingId, ownerId: userId }, select: { id: true } })
+    : null
 
 /** P2025 — строка для `delete` не нашлась: файла нет или он в другой встрече. */
 const isRecordNotFound = (error: unknown): boolean =>
@@ -258,62 +331,86 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
         return status(409, { message: TOO_MANY_FILES })
       }
 
-      const id = Bun.randomUUIDv7()
-      // Путь относительный и всегда со слэшем: переезд каталога загрузок на
-      // другую машину не должен переписывать все строки разом.
-      const relativePath = `${meeting.id}/${id}${extension}`
-      const directory = meetingDirectory(meeting.id)
-      const destination = storedPath(relativePath)
+      // Квота — та же дешёвая отсечка по заявленному размеру: файл, который
+      // заведомо не влезет, не пишется на диск ради отказа. Без заголовка
+      // (chunked) решает вставка — по записанным байтам и под замком.
+      const declared = Number(headers['content-length'])
+      const incoming = Number.isFinite(declared) ? declared : 0
 
-      // FileSink родительский каталог не создаёт — без mkdir первая же запись
-      // во встречу падает с ENOENT.
-      await mkdir(directory, { recursive: true })
-
-      const partPath = `${destination}.part`
-      const size = await writeBody(request.body, partPath, maxSize)
-
-      if (size === null) {
-        return status(413, { message: tooLarge })
+      if ((await usedBytes(prisma, userId)) + BigInt(incoming) > BigInt(STORAGE_QUOTA)) {
+        return status(409, { message: STORAGE_QUOTA_EXCEEDED })
       }
 
-      // Тело короче собственного `Content-Length` — файл неполный, что бы ни
-      // случилось с соединением. Обычно обрыв приходит `AbortError` из цикла
-      // чтения, но замер в браузере оставил обрезок 85 МБ из 200 как готовый
-      // файл: поток тела закончился без ошибки (ресерч, замер 20). Заголовка
-      // нет (chunked) — сверять не с чем.
-      const declaredSize = headers['content-length']
-
-      if (declaredSize !== undefined && Number(declaredSize) !== size) {
-        await unlink(partPath).catch(() => {})
-
-        return status(400, { message: 'Файл пришёл не целиком — загрузите его ещё раз' })
+      // Последним из проверок до записи: место «в пути» занимается только
+      // загрузкой, которая действительно начнёт писать, и освобождается в
+      // `finally` — после ответа, обрыва или исключения.
+      if (!startUpload(userId)) {
+        return status(429, { message: TOO_MANY_UPLOADS })
       }
 
       try {
-        const file = await createWithinLimit({
-          id,
-          name,
-          size: BigInt(size),
-          // Тип формата, а не заявленный: заявленный только проверен выше.
-          mimeType: format.mimeType,
-          kind: format.kind,
-          path: relativePath,
-          meetingId: meeting.id,
-        })
+        const id = Bun.randomUUIDv7()
+        // Путь относительный и всегда со слэшем: переезд каталога загрузок на
+        // другую машину не должен переписывать все строки разом.
+        const relativePath = `${meeting.id}/${id}${extension}`
+        const directory = meetingDirectory(meeting.id)
+        const destination = storedPath(relativePath)
 
-        if (!file) {
-          await unlink(partPath).catch(() => {})
+        // FileSink родительский каталог не создаёт — без mkdir первая же запись
+        // во встречу падает с ENOENT.
+        await mkdir(directory, { recursive: true })
 
-          return status(409, { message: TOO_MANY_FILES })
+        const partPath = `${destination}.part`
+        const size = await writeBody(request.body, partPath, maxSize)
+
+        if (size === null) {
+          return status(413, { message: tooLarge })
         }
 
-        await rename(partPath, destination)
+        // Тело короче собственного `Content-Length` — файл неполный, что бы ни
+        // случилось с соединением. Обычно обрыв приходит `AbortError` из цикла
+        // чтения, но замер в браузере оставил обрезок 85 МБ из 200 как готовый
+        // файл: поток тела закончился без ошибки (ресерч, замер 20). Заголовка
+        // нет (chunked) — сверять не с чем.
+        const declaredSize = headers['content-length']
 
-        return status(201, await toResponse(file, meeting.id, (payload) => fileJwt.sign(payload)))
-      } catch (error) {
-        await unlink(partPath).catch(() => {})
+        if (declaredSize !== undefined && Number(declaredSize) !== size) {
+          await unlink(partPath).catch(() => {})
 
-        throw error
+          return status(400, { message: 'Файл пришёл не целиком — загрузите его ещё раз' })
+        }
+
+        try {
+          const created = await createWithinLimits(userId, {
+            id,
+            name,
+            size: BigInt(size),
+            // Тип формата, а не заявленный: заявленный только проверен выше.
+            mimeType: format.mimeType,
+            kind: format.kind,
+            path: relativePath,
+            meetingId: meeting.id,
+          })
+
+          if (!created.ok) {
+            await unlink(partPath).catch(() => {})
+
+            return status(409, { message: created.message })
+          }
+
+          await rename(partPath, destination)
+
+          return status(
+            201,
+            await toResponse(created.file, meeting.id, (payload) => fileJwt.sign(payload)),
+          )
+        } catch (error) {
+          await unlink(partPath).catch(() => {})
+
+          throw error
+        }
+      } finally {
+        finishUpload(userId)
       }
     },
     {
@@ -329,6 +426,7 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
         409: messageResponse,
         413: messageResponse,
         415: messageResponse,
+        429: messageResponse,
       },
       detail: { summary: 'Upload a file to a meeting', security },
     },
@@ -379,6 +477,10 @@ const ownerRoutes = new Elysia({ name: 'files.owner', prefix: '/meetings', tags:
       // интерфейсе. Удаление по паре (файл, встреча) атомарно: из двух
       // одновременных запросов второй получит P2025, то есть 404, а не 500.
       let removed: { path: string }
+
+      if (!isUuid(params.fileId)) {
+        return status(404, FILE_NOT_FOUND)
+      }
 
       try {
         removed = await prisma.meetingFile.delete({

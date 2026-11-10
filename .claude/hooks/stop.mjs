@@ -30,6 +30,48 @@ const logFile = join(projectDir, '.claude', 'ralph.log')
 // запускал бы ещё одного агента поверх уже работающего.
 const LOOP_ENV = 'RALPH_LOOP'
 
+// Что сессиям цикла запрещено поверх allow-списка из settings.json. Человека в
+// `-p` нет, а читают они чужой текст — issue, diff и описание PR, — так что
+// prompt injection в нём действует руками агента. Запуск кода этим не отнять:
+// агент пишет код и гоняет тесты. Зато отнимаются три вещи, которые переживают
+// саму сессию: правка git-хуков и хуков Claude Code (они исполнились бы потом
+// у человека), доступ к токену `gh` и необратимые действия в репозитории.
+// Здесь, а не в `deny` settings.json: там запрет действовал бы и на
+// интерактивные сессии, где человек сам правит `.claude/` и `.husky/`.
+const LOOP_DISALLOWED_TOOLS = [
+  'Edit(.husky/**)',
+  'Write(.husky/**)',
+  'Edit(.claude/**)',
+  'Write(.claude/**)',
+  'Edit(.git/**)',
+  'Write(.git/**)',
+  'Edit(.mcp.json)',
+  'Write(.mcp.json)',
+  'Bash(git -c *)',
+  'Bash(git config *)',
+  'Bash(git push --force*)',
+  'Bash(git push -f*)',
+  'Bash(gh auth *)',
+  'Bash(gh api *)',
+  'Bash(gh gist *)',
+  'Bash(gh secret *)',
+  'Bash(gh repo *)',
+  'Bash(gh pr merge *)',
+]
+
+/** Аргументы `claude -p` для сессии цикла; запреты — последними, флаг принимает список. */
+function claudeArgs(prompt, maxTurns, extra = []) {
+  return [
+    '-p',
+    prompt,
+    ...extra,
+    '--max-turns',
+    String(maxTurns),
+    '--disallowedTools',
+    ...LOOP_DISALLOWED_TOOLS,
+  ]
+}
+
 const mode = process.argv[2] ?? 'hook'
 
 // Опечатка в флаге не должна молча запускать цикл в обход метки.
@@ -77,6 +119,31 @@ function openIssues(milestone) {
 }
 
 /**
+ * Открытый PR из ветки фазы этого репозитория. `--head` сверяет только имя
+ * ветки, а форк может назвать свою ветку так же, — поэтому PR из форков
+ * отбрасываются по `isCrossRepository`.
+ */
+function openPullRequest(branch) {
+  const output = execFileSync(
+    'gh',
+    [
+      'pr',
+      'list',
+      '--head',
+      branch,
+      '--base',
+      'main',
+      '--state',
+      'open',
+      '--json',
+      'number,isCrossRepository',
+    ],
+    { cwd: projectDir, encoding: 'utf8' },
+  )
+  return JSON.parse(output).find((pr) => !pr.isCrossRepository)
+}
+
+/**
  * Запускает процесс в фоне и сразу возвращает управление. Синхронный запуск
  * держал бы хук открытым всю сессию: дочерняя сессия вызывала бы этот же хук
  * изнутри, процессы вкладывались бы друг в друга, а таймаут хука обрывал бы
@@ -101,11 +168,11 @@ function launch(command, args, env) {
 function runClaude(prompt, maxTurns) {
   const out = openSync(logFile, 'a')
   try {
-    execFileSync(
-      'claude',
-      ['-p', prompt, '--model', 'claude-opus-5-5', '--max-turns', String(maxTurns)],
-      { cwd: projectDir, env: envWithoutLoopMark(), stdio: ['ignore', out, out] },
-    )
+    execFileSync('claude', claudeArgs(prompt, maxTurns, ['--model', 'claude-opus-5-5']), {
+      cwd: projectDir,
+      env: envWithoutLoopMark(),
+      stdio: ['ignore', out, out],
+    })
   } finally {
     closeSync(out)
   }
@@ -147,7 +214,7 @@ function step(state) {
   const prompt = config.prompt
     .replaceAll('{milestone}', phase.milestone)
     .replaceAll('{branch}', phase.branch)
-  launch('claude', ['-p', prompt, '--max-turns', String(config.maxTurns)], {
+  launch('claude', claudeArgs(prompt, config.maxTurns), {
     ...process.env,
     [LOOP_ENV]: '1',
   })
@@ -159,9 +226,19 @@ function finishPhase(state) {
 
   runClaude(`Создай PR из ветки ${phase.branch} в main с названием 'feat: ${phase.milestone}'.`, 10)
 
-  log('🔍 Ревью Opus 5.5...')
+  // Номер PR ищет скрипт, по ветке фазы, — а не агент «последний открытый».
+  // Последним мог оказаться чужой PR, открытый следом за ботом, и тогда ревью
+  // читало бы чужой diff с полными правами сессии цикла.
+  const pr = openPullRequest(phase.branch)
+
+  if (!pr) {
+    log(`❌ Открытого PR из ${phase.branch} нет — ревью не запускаем, фаза не закрыта.`)
+    return
+  }
+
+  log(`🔍 Ревью Opus 5.5: PR #${pr.number}...`)
   runClaude(
-    'Найди последний открытый PR и проведи детальное code review. Проверь архитектуру, безопасность, производительность и соответствие PRD. Оставь комментарии в PR через gh cli.',
+    `Проведи детальное code review PR #${pr.number} (ветка ${phase.branch}). Проверь архитектуру, безопасность, производительность и соответствие PRD. Оставь комментарии в PR через gh cli.`,
     config.maxTurns,
   )
 

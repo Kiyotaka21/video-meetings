@@ -19,6 +19,37 @@ const required = (name: string, value: string | undefined): string => {
 }
 
 /**
+ * Значение, которое когда-то стояло в `.env.example`. Сам пример теперь
+ * пустой, но `.env`, скопированные с прежней версии, несут его до сих пор, а
+ * секрет из репозитория известен всем: с ним подделывается токен любого
+ * пользователя и любая ссылка на файл.
+ */
+const EXAMPLE_JWT_SECRET = 'change-me-in-your-own-env'
+
+/** 256 бит — ключ HS256 не короче выхода SHA-256 (RFC 7518, 3.2). */
+export const MIN_JWT_SECRET_BYTES = 32
+
+/**
+ * Секрет подписи обязан быть непредсказуемым, а не только непустым: короткий
+ * перебирается офлайн по любому выданному токену, а из примера — известен.
+ */
+const jwtSecret = (value: string | undefined): string => {
+  const secret = required('JWT_SECRET', value)
+
+  if (secret === EXAMPLE_JWT_SECRET) {
+    throw new Error('JWT_SECRET взят из .env.example — сгенерируй свой: openssl rand -base64 48')
+  }
+
+  if (Buffer.byteLength(secret) < MIN_JWT_SECRET_BYTES) {
+    throw new Error(
+      `JWT_SECRET короче ${MIN_JWT_SECRET_BYTES} байт — сгенерируй свой: openssl rand -base64 48`,
+    )
+  }
+
+  return secret
+}
+
+/**
  * Потолок тела у Bun.serve — не «чуть выше лимита записи», а далеко за любым
  * правдоподобным файлом. Запрос с `Content-Length` сверх потолка Bun отбивает
  * сам, до обработчика: его 413 уходит без CORS-заголовков, а соединение
@@ -35,7 +66,7 @@ export const env = {
   port: Number(Bun.env.PORT ?? 3000),
   corsOrigins: parseOrigins(Bun.env.CORS_ORIGINS ?? 'http://localhost:5173'),
   databaseUrl: required('DATABASE_URL', Bun.env.DATABASE_URL),
-  jwtSecret: required('JWT_SECRET', Bun.env.JWT_SECRET),
+  jwtSecret: jwtSecret(Bun.env.JWT_SECRET),
   jwtExpiresIn: Bun.env.JWT_EXPIRES_IN ?? '7d',
 
   /**

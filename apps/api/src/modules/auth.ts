@@ -1,8 +1,10 @@
 import { jwt } from '@elysiajs/jwt'
+import type { Server } from 'bun'
 import { Elysia, t } from 'elysia'
 
 import { env } from '../config/env'
 import { prisma } from '../db/prisma'
+import { createRateLimiter, tooManyAttempts } from '../lib/rate-limit'
 import { avatarUrl } from './avatars'
 import {
   AVATAR_INCOMPLETE,
@@ -142,6 +144,47 @@ const SAME_PASSWORD = { message: 'Новый пароль совпадает с 
  */
 const ABSENT_USER_PASSWORD_HASH =
   '$argon2id$v=19$m=65536,t=2,p=1$EcC/76CmMDCWPVGAo4QefcGhFIhNOuvc67xRt0bX78s$huUaLzU4dp/FCeJWH3zVtBUgiFIYQOPEvggZUP1/xjk'
+
+const FIFTEEN_MINUTES = 15 * 60 * 1000
+const ONE_HOUR = 60 * 60 * 1000
+
+/**
+ * Потолки перебора. Каждая попытка входа, регистрации и смены пароля — argon2
+ * на 64 МиБ, и без них `/auth/login` перебирали бы без помех, а украденный
+ * токен позволял бы подобрать текущий пароль на `/auth/me/password` и сменить
+ * его, то есть увести учётку.
+ *
+ * Неудачи входа считаются по адресу, а не по IP: перебор одного адреса с
+ * тысячи машин IP-потолок не остановил бы. Плата — чужой может на 15 минут
+ * закрыть вход владельцу, засыпав адрес неудачами; окно короткое, а пароль от
+ * этого не утекает. Неизвестный адрес считается так же, как известный, — иначе
+ * 429 подтверждал бы, что учётка есть.
+ */
+export const LOGIN_FAILURE_LIMIT = 10
+export const PASSWORD_FAILURE_LIMIT = 5
+
+/**
+ * Потолки по IP — на случай перебора многих адресов с одной машины. Через
+ * `app.handle` адреса клиента нет, и они не действуют; за обратным прокси все
+ * запросы приходят с его адреса — там потолок по IP переезжает в прокси.
+ */
+export const LOGIN_ATTEMPTS_PER_IP = 50
+export const REGISTRATIONS_PER_IP = 10
+
+const loginFailures = createRateLimiter({ limit: LOGIN_FAILURE_LIMIT, windowMs: FIFTEEN_MINUTES })
+const passwordFailures = createRateLimiter({
+  limit: PASSWORD_FAILURE_LIMIT,
+  windowMs: FIFTEEN_MINUTES,
+})
+const loginAttemptsByIp = createRateLimiter({
+  limit: LOGIN_ATTEMPTS_PER_IP,
+  windowMs: FIFTEEN_MINUTES,
+})
+const registrationsByIp = createRateLimiter({ limit: REGISTRATIONS_PER_IP, windowMs: ONE_HOUR })
+
+/** Адрес клиента: у `app.handle` сервера нет, и тогда — `null`. */
+const clientIp = (server: Server<unknown> | null, request: Request): string | null =>
+  server?.requestIP(request)?.address ?? null
 
 /** Адрес в базе хранится в нижнем регистре — иначе Foo@ и foo@ разойдутся в двух учётках. */
 const normalizeEmail = (email: string): string => email.trim().toLowerCase()
@@ -289,7 +332,17 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
   )
   .post(
     '/me/password',
-    async ({ userId, body, jwt, status }) => {
+    async ({ userId, body, jwt, status, set }) => {
+      // До argon2: исчерпанный потолок не стоит ни хеширования, ни запроса.
+      // 429, а не 401 — сессия жива, и выкидывать на /login не за что.
+      const wait = passwordFailures.retryAfter(userId)
+
+      if (wait > 0) {
+        set.headers['retry-after'] = String(wait)
+
+        return status(429, { message: tooManyAttempts('Слишком много попыток.', wait) })
+      }
+
       const user = await prisma.user.findUnique({
         where: { id: userId },
         select: { passwordHash: true },
@@ -303,6 +356,8 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
       // 403, а не 401: на фронтенде 401 значит «сессия кончилась», и опечатка
       // в поле формы погасила бы куку и выкинула пользователя на /login.
       if (!(await Bun.password.verify(body.currentPassword, user.passwordHash))) {
+        passwordFailures.hit(userId)
+
         return status(403, WRONG_CURRENT_PASSWORD)
       }
 
@@ -324,6 +379,8 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
           select: { id: true, email: true, tokenVersion: true },
         })
 
+        passwordFailures.reset(userId)
+
         // Новый токен в ответ: вкладка, сменившая пароль, держит токен старой
         // версии и без него вышла бы из системы вместе со всеми.
         return { token: await jwt.sign(sessionClaims(updated)) }
@@ -342,6 +399,7 @@ const currentUserRoutes = new Elysia({ name: 'auth.me' })
         400: messageResponse,
         401: messageResponse,
         403: messageResponse,
+        429: messageResponse,
       },
       detail: { summary: 'Change the password and revoke all other sessions', security },
     },
@@ -451,8 +509,25 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
   .use(jwtPlugin)
   .post(
     '/register',
-    async ({ body, jwt, status }) => {
+    async ({ body, jwt, status, set, server, request }) => {
       const email = normalizeEmail(body.email)
+      const ip = clientIp(server, request)
+
+      // Считается каждая попытка, и 409 тоже: по нему перебирают, какие
+      // адреса заняты.
+      if (ip !== null) {
+        const wait = registrationsByIp.retryAfter(ip)
+
+        if (wait > 0) {
+          set.headers['retry-after'] = String(wait)
+
+          return status(429, {
+            message: tooManyAttempts('Слишком много регистраций с этого адреса.', wait),
+          })
+        }
+
+        registrationsByIp.hit(ip)
+      }
 
       try {
         const user = await prisma.user.create({
@@ -476,14 +551,36 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       response: {
         201: tokenResponse,
         409: messageResponse,
+        429: messageResponse,
       },
       detail: { summary: 'Register with e-mail and password' },
     },
   )
   .post(
     '/login',
-    async ({ body, jwt, status }) => {
-      const user = await prisma.user.findUnique({ where: { email: normalizeEmail(body.email) } })
+    async ({ body, jwt, status, set, server, request }) => {
+      const email = normalizeEmail(body.email)
+      const ip = clientIp(server, request)
+
+      // До argon2: исчерпанный потолок не стоит хеширования. Верный пароль
+      // при исчерпанном потолке — тоже 429: иначе перебор просто продолжался
+      // бы, отличая верный пароль по коду ответа.
+      const wait = Math.max(
+        loginFailures.retryAfter(email),
+        ip === null ? 0 : loginAttemptsByIp.retryAfter(ip),
+      )
+
+      if (wait > 0) {
+        set.headers['retry-after'] = String(wait)
+
+        return status(429, { message: tooManyAttempts('Слишком много попыток входа.', wait) })
+      }
+
+      if (ip !== null) {
+        loginAttemptsByIp.hit(ip)
+      }
+
+      const user = await prisma.user.findUnique({ where: { email } })
 
       const passwordMatches = await Bun.password.verify(
         body.password,
@@ -491,8 +588,13 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       )
 
       if (!user || !passwordMatches) {
+        loginFailures.hit(email)
+
         return status(401, INVALID_CREDENTIALS)
       }
+
+      // Удачный вход обнуляет счётчик адреса: опечатки владельца не копятся.
+      loginFailures.reset(email)
 
       return { token: await jwt.sign(sessionClaims(user)) }
     },
@@ -501,6 +603,7 @@ export const authModule = new Elysia({ prefix: '/auth', tags: ['Auth'] })
       response: {
         200: tokenResponse,
         401: messageResponse,
+        429: messageResponse,
       },
       detail: { summary: 'Log in with e-mail and password' },
     },

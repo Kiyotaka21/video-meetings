@@ -8,14 +8,25 @@ import { avatarsModule } from './modules/avatars'
 import { filesModule } from './modules/files'
 import { healthModule } from './modules/health'
 import { meetingsModule } from './modules/meetings'
+import { bodyLimit } from './plugins/body-limit'
+import { internalErrors } from './plugins/errors'
 
 export const app = new Elysia()
   .use(
     cors({
       origin: env.corsOrigins,
       credentials: true,
+      // Каждый закрытый запрос несёт `Authorization`, и перед ним идёт
+      // preflight, если браузер не помнит ответа по этому адресу. Дефолт
+      // плагина — 5 с: в проде это лишний круг до сервера почти перед каждым
+      // запросом. Два часа — потолок Chrome, больше он всё равно не держит.
+      maxAge: 7200,
     }),
   )
+  // После `cors`: отказы обоих плагинов уходят с CORS-заголовками, иначе
+  // браузер спрятал бы их от страницы, и вместо причины она увидела бы обрыв.
+  .use(bodyLimit)
+  .use(internalErrors)
   .use(
     openapi({
       path: '/docs',

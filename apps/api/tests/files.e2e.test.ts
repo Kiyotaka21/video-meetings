@@ -228,6 +228,41 @@ describe('POST /meetings/:id/files', () => {
     expect(storedFiles(meetingId)).toEqual([])
   })
 
+  // NUL Postgres не принимает в тексте — вставка падала пятисоткой, уже
+  // записав всё тело на диск. Перевод строки ломает заголовок при отдаче, а
+  // bidi-символы подделывают видимое имя: `invoice‮fdp.pdf` в списке
+  // выглядит как `invoicefdp.pdf` наоборот.
+  for (const [label, name] of [
+    ['NUL', 'report\u0000.pdf'],
+    ['перевод строки', 'report\r\n.pdf'],
+    ['управляющий C1 (U+0085)', 'report\u0085.pdf'],
+    ['разделитель строк U+2028', 'report .pdf'],
+    ['bidi-переопределение U+202E', 'invoice‮fdp.pdf'],
+    ['bidi-изоляция U+2066', 'invoice⁦.pdf'],
+    ['метка направления U+200F', 'invoice‏.pdf'],
+  ]) {
+    it(`имя с символом «${label}» → 400 до записи, каталог не создан`, async () => {
+      const owner = await registerUser()
+      const meetingId = await createMeeting(owner.token)
+
+      const response = await postFile(filesPath(meetingId), document(name), owner.token)
+
+      expect(response.status).toBe(400)
+      expect(existsSync(meetingDir(meetingId))).toBe(false)
+    })
+  }
+
+  it('кириллица, пробелы и скобки в имени — по-прежнему годное имя', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+    const name = 'Протокол (итог) — 12 сентября.pdf'
+
+    const response = await postFile(filesPath(meetingId), document(name), owner.token)
+
+    expect(response.status).toBe(201)
+    expect(asFile(response.body).name).toBe(name)
+  })
+
   it('на чужую встречу не создаёт каталог на диске', async () => {
     const owner = await registerUser()
     const stranger = await registerUser()
@@ -789,5 +824,21 @@ describe('GET /meetings/:id/files', () => {
 
     expect(own.map((file) => file.id)).toEqual([uploaded.id])
     expect(other).toEqual([])
+  })
+})
+
+describe('Id в пути не похож на uuid', () => {
+  // `%00` доезжал до Postgres как NUL в тексте, и запрос падал пятисоткой.
+  // Для клиента «не uuid» — то же, что несуществующий id: 404.
+  it('загрузка, список и удаление на кривой id → 404, а не 500', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+
+    for (const id of ['%00', 'not-a-uuid']) {
+      expect((await postFile(filesPath(id), document(), owner.token)).status).toBe(404)
+      expect((await getJson(filesPath(id), owner.token)).status).toBe(404)
+      expect((await deleteJson(`${filesPath(id)}/${randomUUID()}`, owner.token)).status).toBe(404)
+      expect((await deleteJson(`${filesPath(meetingId)}/${id}`, owner.token)).status).toBe(404)
+    }
   })
 })
