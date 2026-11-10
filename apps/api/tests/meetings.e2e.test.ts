@@ -3,9 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'bun:test'
 
 import { getJson, postJson, type ApiResponse } from './helpers/http'
-import { signJwt } from './helpers/jwt'
+import { resignedGenuine, SESSION_FORGERIES } from './helpers/forgeries'
 import { registerUser } from './helpers/users'
-import { TEST_JWT_SECRET } from './setup'
 
 /**
  * Контракт встреч, e2e через `app.handle`. Все три маршрута — под авторизацией:
@@ -38,13 +37,6 @@ const asMeeting = (body: unknown): Meeting => {
   return body as Meeting
 }
 
-const asMeetings = (body: unknown): Meeting[] => {
-  expect(Array.isArray(body)).toBe(true)
-  return body as Meeting[]
-}
-
-const idsOf = (body: unknown): string[] => asMeetings(body).map((meeting) => meeting.id)
-
 /** Создаёт встречу и возвращает её же — большинству тестов нужна готовая запись. */
 const createMeeting = async (token: string, overrides?: Record<string, unknown>) => {
   const response = await postJson(MEETINGS, meetingPayload(overrides), token)
@@ -53,8 +45,6 @@ const createMeeting = async (token: string, overrides?: Record<string, unknown>)
 
   return asMeeting(response.body)
 }
-
-const secondsFromNow = (seconds: number): number => Math.floor(Date.now() / 1000) + seconds
 
 describe('Авторизация на /meetings', () => {
   /** Каждый маршрут проверяется отдельно: забыть guard легко именно на одном из них. */
@@ -73,23 +63,28 @@ describe('Авторизация на /meetings', () => {
     })
   }
 
-  const rejectedTokens: Array<[string, string]> = [
-    ['мусор вместо токена', 'not-a-jwt-at-all'],
-    [
-      'подпись чужим секретом',
-      signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'secret-from-another-service'),
-    ],
-    ['истёкший токен', signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
-    ['подпись нашим секретом, но без sub', signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
-  ]
+  // Подделки собраны из настоящего токена: 401 на них — работа проверки
+  // подписи и срока, а не поиска пользователя по случайному `sub`.
+  for (const [name, forge] of SESSION_FORGERIES) {
+    for (const [route, call] of routes) {
+      it(`${route} отклоняет: ${name}`, async () => {
+        const user = await registerUser()
 
-  for (const [name, token] of rejectedTokens) {
-    it(`GET /meetings отклоняет: ${name}`, async () => {
-      const response = await getJson(MEETINGS, token)
+        const response = await call(forge(user.token))
 
-      expect(response.status).toBe(401)
-    })
+        expect(response.status).toBe(401)
+        expect(response.body).not.toHaveProperty('title')
+      })
+    }
   }
+
+  it('контроль к подделкам: те же claims с нашей подписью открывают список', async () => {
+    const user = await registerUser()
+
+    const response = await getJson(MEETINGS, resignedGenuine(user.token))
+
+    expect(response.status).toBe(200)
+  })
 })
 
 describe('POST /meetings', () => {
@@ -173,7 +168,23 @@ describe('POST /meetings', () => {
     ['без participants', { title: 'Weekly sync', date: '2026-03-01T10:00:00.000Z' }],
     ['participants не массив', meetingPayload({ participants: 'alice@example.com' })],
     ['участник не e-mail', meetingPayload({ participants: ['not-an-email'] })],
+    // NUL Postgres в тексте не принимает: без шаблона это была пятисотка.
+    ['NUL в title', meetingPayload({ title: 'Weekly\u0000sync' })],
+    ['перевод строки в title', meetingPayload({ title: 'Weekly\nsync' })],
+    ['разделитель строк U+2028 в title', meetingPayload({ title: 'Weekly sync' })],
+    ['title длиннее 200 символов', meetingPayload({ title: 'я'.repeat(201) })],
   ]
+
+  it('title ровно на 200 символов, с эмодзи и кириллицей, принимается', async () => {
+    const user = await registerUser()
+    const title = `Планёрка 🚀 ${'я'.repeat(200 - 'Планёрка 🚀 '.length)}`
+
+    const response = await postJson(MEETINGS, meetingPayload({ title }), user.token)
+
+    expect(title.length).toBe(200)
+    expect(response.status).toBe(201)
+    expect(asMeeting(response.body).title).toBe(title)
+  })
 
   for (const [name, payload] of invalidPayloads) {
     it(`отклоняет тело запроса: ${name}`, async () => {
@@ -188,48 +199,174 @@ describe('POST /meetings', () => {
 })
 
 describe('GET /meetings', () => {
-  it('у нового пользователя список пуст', async () => {
+  const DAY = 24 * 60 * 60 * 1000
+
+  /** Даты от «сейчас»: граница предстоящих и прошедших — часы сервера. */
+  const daysFromNow = (days: number): string => new Date(Date.now() + days * DAY).toISOString()
+
+  interface Page {
+    items: Meeting[]
+    total: number
+    nextCursor: string | null
+  }
+
+  const pageOf = (response: ApiResponse): Page => {
+    expect(response.status).toBe(200)
+    expect(Object.keys(response.body as object).sort()).toEqual(['items', 'nextCursor', 'total'])
+
+    return response.body as Page
+  }
+
+  const idsOf = (page: Page): string[] => page.items.map((meeting) => meeting.id)
+
+  const list = (token: string, query = '') => getJson(`${MEETINGS}${query}`, token)
+
+  /** Все страницы выборки подряд, по курсору, — как их догружает кабинет. */
+  const walk = async (token: string, query: string): Promise<{ ids: string[]; pages: Page[] }> => {
+    const pages: Page[] = []
+    let cursor: string | null = null
+
+    do {
+      const suffix: string = cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`
+      const page = pageOf(await list(token, `?${query}${suffix}`))
+
+      pages.push(page)
+      cursor = page.nextCursor
+    } while (cursor !== null && pages.length < 20)
+
+    return { ids: pages.flatMap(idsOf), pages }
+  }
+
+  it('у нового пользователя пусто: ни встреч, ни курсора', async () => {
     const user = await registerUser()
 
-    const response = await getJson(MEETINGS, user.token)
-
-    expect(response.status).toBe(200)
-    expect(response.body).toEqual([])
+    expect(pageOf(await list(user.token))).toEqual({ items: [], total: 0, nextCursor: null })
   })
 
-  it('возвращает встречи текущего пользователя целиком, как их отдал POST', async () => {
+  it('по умолчанию — предстоящие, ближайшие первыми; прошедших в них нет', async () => {
     const user = await registerUser()
-    const meeting = await createMeeting(user.token)
+    const later = await createMeeting(user.token, { date: daysFromNow(30) })
+    const sooner = await createMeeting(user.token, { date: daysFromNow(1) })
+    await createMeeting(user.token, { date: daysFromNow(-1) })
+    const between = await createMeeting(user.token, { date: daysFromNow(7) })
 
-    const response = await getJson(MEETINGS, user.token)
+    const page = pageOf(await list(user.token))
 
-    expect(response.status).toBe(200)
-    expect(response.body).toEqual([meeting])
+    expect(idsOf(page)).toEqual([sooner.id, between.id, later.id])
+    expect(page.total).toBe(3)
+    expect(page.nextCursor).toBeNull()
   })
 
-  it('сортирует встречи по дате: ближайшие первыми', async () => {
+  it('встреча в списке — целиком, как её отдал POST', async () => {
     const user = await registerUser()
-    const later = await createMeeting(user.token, { date: '2026-05-01T10:00:00.000Z' })
-    const sooner = await createMeeting(user.token, { date: '2026-02-01T10:00:00.000Z' })
-    const between = await createMeeting(user.token, { date: '2026-03-01T10:00:00.000Z' })
+    const meeting = await createMeeting(user.token, { date: daysFromNow(2) })
 
-    const response = await getJson(MEETINGS, user.token)
+    expect(pageOf(await list(user.token, '?scope=upcoming')).items).toEqual([meeting])
+  })
 
-    expect(idsOf(response.body)).toEqual([sooner.id, between.id, later.id])
+  it('scope=past — прошедшие, самая свежая первой', async () => {
+    const user = await registerUser()
+    const oldest = await createMeeting(user.token, { date: daysFromNow(-30) })
+    const freshest = await createMeeting(user.token, { date: daysFromNow(-1) })
+    const between = await createMeeting(user.token, { date: daysFromNow(-7) })
+    await createMeeting(user.token, { date: daysFromNow(1) })
+
+    const page = pageOf(await list(user.token, '?scope=past'))
+
+    expect(idsOf(page)).toEqual([freshest.id, between.id, oldest.id])
+    expect(page.total).toBe(3)
+  })
+
+  it('limit режет страницу, курсор ведёт дальше без пропусков и повторов', async () => {
+    const user = await registerUser()
+    const created: Meeting[] = []
+
+    for (const days of [5, 1, 4, 2, 3]) {
+      created.push(await createMeeting(user.token, { date: daysFromNow(days) }))
+    }
+
+    const byDate = [...created].sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+    const { ids, pages } = await walk(user.token, 'scope=upcoming&limit=2')
+
+    expect(ids).toEqual(byDate.map((meeting) => meeting.id))
+    expect(pages.map((page) => page.items.length)).toEqual([2, 2, 1])
+    // `total` — вся выборка, а не страница: по нему кабинет пишет счётчик.
+    expect(pages.map((page) => page.total)).toEqual([5, 5, 5])
+    expect(pages.at(-1)?.nextCursor).toBeNull()
+  })
+
+  it('встречи с одной датой не теряются на стыке страниц', async () => {
+    // Курсор — пара (дата, id): по одной дате одинаковые метки на границе
+    // страницы выпали бы или задвоились.
+    const user = await registerUser()
+    const date = daysFromNow(3)
+    const created = [
+      await createMeeting(user.token, { date }),
+      await createMeeting(user.token, { date }),
+      await createMeeting(user.token, { date }),
+    ]
+
+    const { ids } = await walk(user.token, 'scope=upcoming&limit=1')
+
+    expect(ids).toEqual(created.map((meeting) => meeting.id).sort())
+  })
+
+  it('scope=past листается тем же курсором, от свежих к старым', async () => {
+    const user = await registerUser()
+    const created: Meeting[] = []
+
+    for (const days of [-3, -1, -2]) {
+      created.push(await createMeeting(user.token, { date: daysFromNow(days) }))
+    }
+
+    const byDateDesc = [...created].sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+
+    expect((await walk(user.token, 'scope=past&limit=2')).ids).toEqual(
+      byDateDesc.map((meeting) => meeting.id),
+    )
+  })
+
+  it('страница по умолчанию — 20 встреч', async () => {
+    const user = await registerUser()
+
+    for (let index = 0; index < 21; index += 1) {
+      await createMeeting(user.token, { date: daysFromNow(index + 1) })
+    }
+
+    const page = pageOf(await list(user.token))
+
+    expect(page.items).toHaveLength(20)
+    expect(page.total).toBe(21)
+    expect(page.nextCursor).not.toBeNull()
   })
 
   it('не показывает встречи другого пользователя', async () => {
     const owner = await registerUser()
     const stranger = await registerUser()
-    const meeting = await createMeeting(owner.token)
+    const meeting = await createMeeting(owner.token, { date: daysFromNow(1) })
 
-    const strangerList = await getJson(MEETINGS, stranger.token)
-    const ownerList = await getJson(MEETINGS, owner.token)
-
-    expect(strangerList.status).toBe(200)
-    expect(strangerList.body).toEqual([])
-    expect(idsOf(ownerList.body)).toEqual([meeting.id])
+    expect(pageOf(await list(stranger.token)).items).toEqual([])
+    expect(idsOf(pageOf(await list(owner.token)))).toEqual([meeting.id])
   })
+
+  for (const query of ['?scope=all', '?limit=0', '?limit=101', '?limit=abc', '?limit=2.5']) {
+    it(`«${query}» → 422`, async () => {
+      const user = await registerUser()
+
+      expect((await list(user.token, query)).status).toBe(422)
+    })
+  }
+
+  for (const cursor of ['garbage', 'bm90LWEtY3Vyc29y', '%00']) {
+    it(`битый курсор «${cursor}» → 400, а не 500`, async () => {
+      const user = await registerUser()
+
+      const response = await list(user.token, `?cursor=${cursor}`)
+
+      expect(response.status).toBe(400)
+      expect(typeof (response.body as { message?: unknown }).message).toBe('string')
+    })
+  }
 })
 
 describe('GET /meetings/:id', () => {
@@ -254,14 +391,18 @@ describe('GET /meetings/:id', () => {
     expect(typeof (response.body as { message?: unknown }).message).toBe('string')
   })
 
-  it('404 на id, который не похож на идентификатор', async () => {
-    const user = await registerUser()
+  // `%00` в пути доезжал до Postgres как NUL в тексте — и запрос падал
+  // пятисоткой. Id из пути сверяется с форматом uuid до базы.
+  for (const id of ['not-an-id', '%00', `${randomUUID()}%00`, `${randomUUID()}x`]) {
+    it(`404 на id «${id}», который не похож на идентификатор`, async () => {
+      const user = await registerUser()
 
-    const response = await getJson(`${MEETINGS}/not-an-id`, user.token)
+      const response = await getJson(`${MEETINGS}/${id}`, user.token)
 
-    expect(response.status).toBe(404)
-    expect(typeof (response.body as { message?: unknown }).message).toBe('string')
-  })
+      expect(response.status).toBe(404)
+      expect(typeof (response.body as { message?: unknown }).message).toBe('string')
+    })
+  }
 
   it('404, а не 403, на чужую встречу — существование не подтверждается', async () => {
     const owner = await registerUser()

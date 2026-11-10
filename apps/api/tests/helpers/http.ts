@@ -39,19 +39,30 @@ export const requestRaw = (path: string, init?: RequestInit): Promise<Response> 
 const authorization = (token?: string): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` }
 
+/**
+ * JSON-тело с `Content-Length`, как его шлёт браузер. `new Request` длину сам не
+ * проставляет (ресерч загрузки, замер 15), а api отбивает тело без длины 411-м
+ * на всех маршрутах, кроме потоковых загрузок (`src/plugins/body-limit.ts`).
+ */
+export const jsonInit = (method: string, payload: unknown, token?: string): RequestInit => {
+  const body = typeof payload === 'string' ? payload : JSON.stringify(payload)
+
+  return {
+    method,
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String(Buffer.byteLength(body)),
+      ...authorization(token),
+    },
+    body,
+  }
+}
+
 export const postJson = (path: string, payload: unknown, token?: string): Promise<ApiResponse> =>
-  request(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...authorization(token) },
-    body: JSON.stringify(payload),
-  })
+  request(path, jsonInit('POST', payload, token))
 
 export const patchJson = (path: string, payload: unknown, token?: string): Promise<ApiResponse> =>
-  request(path, {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json', ...authorization(token) },
-    body: JSON.stringify(payload),
-  })
+  request(path, jsonInit('PATCH', payload, token))
 
 export const getJson = (path: string, token?: string): Promise<ApiResponse> =>
   request(path, { method: 'GET', headers: authorization(token) })

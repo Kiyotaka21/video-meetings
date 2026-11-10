@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia'
 
 import { prisma } from '../../db/prisma'
+import { isUuid } from '../../lib/ids'
 import { fileLinkJwt } from './link'
 import { storedPath } from './storage'
 
@@ -60,9 +61,11 @@ const parseRange = (
   }
 
   const start = Number(first)
-  const end = last === '' ? size - 1 : Number(last)
 
-  if (end < start) {
+  // Конец раньше начала — синтаксический брак, то есть весь файл. Сверяется
+  // с присланным концом, а не с размером файла: иначе у пустого файла
+  // `bytes=0-` (конец «−1») выглядел браком и получал 200 вместо 416.
+  if (last !== '' && Number(last) < start) {
     return null
   }
 
@@ -71,7 +74,7 @@ const parseRange = (
   }
 
   // Конец за пределами файла — не ошибка: отдаём до последнего байта.
-  return { start, end: Math.min(end, size - 1) }
+  return { start, end: last === '' ? size - 1 : Math.min(Number(last), size - 1) }
 }
 
 /**
@@ -119,11 +122,15 @@ export const fileContentRoutes = new Elysia({
       }
 
       // Строка ищется по паре (файл, встреча): годный токен с id чужой встречи
-      // в пути не находит ничего, а не чужой файл.
-      const file = await prisma.meetingFile.findFirst({
-        where: { id: params.fileId, meetingId: params.id },
-        select: { name: true, mimeType: true, path: true },
-      })
+      // в пути не находит ничего, а не чужой файл. `fileId` равен `sub`
+      // нашего токена, то есть uuid; id встречи из пути сверяется с форматом
+      // до базы — `%00` ронял запрос пятисоткой.
+      const file = isUuid(params.id)
+        ? await prisma.meetingFile.findFirst({
+            where: { id: params.fileId, meetingId: params.id },
+            select: { name: true, mimeType: true, path: true },
+          })
+        : null
 
       if (!file) {
         return status(404, FILE_NOT_FOUND)
@@ -152,37 +159,30 @@ export const fileContentRoutes = new Elysia({
         return status(416, { message: 'Range Not Satisfiable' })
       }
 
-      const fileHeaders = {
-        'content-type': file.mimeType,
-        'content-disposition': contentDisposition(file.name),
-        // `mimeType` в метаданных — канонический тип формата, а не заявленный
-        // клиентом (`limits.ts`); `nosniff` не даёт браузеру передумать.
-        'x-content-type-options': 'nosniff',
+      set.headers['content-type'] = file.mimeType
+      set.headers['content-disposition'] = contentDisposition(file.name)
+      // `mimeType` в метаданных — канонический тип формата, а не заявленный
+      // клиентом (`limits.ts`); `nosniff` не даёт браузеру передумать.
+      set.headers['x-content-type-options'] = 'nosniff'
+
+      // Сам `Bun.file`, а не `Response` с ним. `Response` Elysia
+      // переупаковывает в поток (в `set.headers` всегда CORS), и живой сервер
+      // отдавал и 200, и 206 chunked — без длины, в обход sendfile, каждый байт
+      // записи через JS (замер 21 в ресерче). `Bun.file` Elysia отдаёт своим
+      // `handleFile`: длину Bun ставит сам, а `Range` она режет по тому же
+      // заголовку запроса. Для одного годного диапазона её разбор совпадает с
+      // `parseRange` байт в байт — начало, конец, суффикс, обрезка по размеру;
+      // это и сверяют тесты на `Range`, а длину — `tests/live.e2e.test.ts`.
+      if (range !== null || headers.range === undefined) {
+        return blob
       }
 
-      // `Response` с `Bun.file` и `Content-Length` руками, а не авто-`Range`
-      // Bun: Elysia переупаковывает ответ, связь с файлом теряется, и на
-      // `Range` молча приходит 200 с файлом целиком (ресерч, 2.2, elysia#1868).
-      // Без явной длины ответ уходит chunked, и `<video>` не знает длительности.
-      if (range === null) {
-        return new Response(blob, {
-          headers: { ...fileHeaders, 'content-length': String(size) },
-        })
-      }
-
-      // `.stream()` у куска обязателен. Elysia переупаковывает ответ через
-      // `new Response(response.body)`, как только в `set.headers` что-то есть, —
-      // а здесь там `Accept-Ranges` и CORS. У `Response` из `BunFile.slice()`
-      // поток `body` теряет конец куска и читает до конца файла: на
-      // `bytes=0-99` уходило 206 с тысячей байт (замер 19 в ресерче).
-      return new Response(blob.slice(range.start, range.end + 1).stream(), {
-        status: 206,
-        headers: {
-          ...fileHeaders,
-          'content-length': String(range.end - range.start + 1),
-          'content-range': `bytes ${range.start}-${range.end}/${size}`,
-        },
-      })
+      // Брак и несколько диапазонов Elysia разобрала бы по-своему: несколько —
+      // 206 на первый, `bytes=-` и конец раньше начала — 416. Наш контракт —
+      // файл целиком с 200 (RFC 9110 разрешает игнорировать непонятный
+      // `Range`), поэтому здесь ответ собирается руками. Он уходит chunked, но
+      // плеер таких заголовков не шлёт.
+      return new Response(blob, { headers: { 'content-length': String(size) } })
     },
     {
       params: t.Object({ id: t.String(), fileId: t.String() }),

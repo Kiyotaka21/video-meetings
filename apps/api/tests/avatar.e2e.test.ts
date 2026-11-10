@@ -26,6 +26,7 @@ import {
   uploadAvatar,
 } from './helpers/avatars'
 import { messageOf } from './helpers/files'
+import { resignedGenuine, SESSION_FORGERIES } from './helpers/forgeries'
 import { deleteJson, getJson, postJson, requestRaw } from './helpers/http'
 import { gif, heic, jpeg, padded, paddedStream, png, svg, text, wav, webp } from './helpers/images'
 import { decodeJwt, signJwt } from './helpers/jwt'
@@ -87,31 +88,38 @@ describe('Авторизация на /auth/me/avatar', () => {
    * Токены, которые обязан отбить guard. Тело PUT до записи не доходит —
    * на диске после отказа ничего, — а DELETE не трогает чужой аватар.
    */
-  const rejectedTokens: Array<[string, () => string]> = [
-    [
-      'подпись чужим секретом',
-      () => signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, 'another-secret'),
-    ],
-    ['истёкший', () => signJwt({ sub: randomUUID(), exp: secondsFromNow(-60) }, TEST_JWT_SECRET)],
-    ['без sub', () => signJwt({ exp: secondsFromNow(3600) }, TEST_JWT_SECRET)],
+  // Подделки собраны из настоящего токена живого пользователя: 401 на них —
+  // работа проверки подписи и срока, а не поиска по случайному `sub`.
+  const rejectedTokens: Array<[string, (genuine: string) => string]> = [
+    ...SESSION_FORGERIES,
     [
       'годная подпись, а пользователя нет',
       () => signJwt({ sub: randomUUID(), exp: secondsFromNow(3600) }, TEST_JWT_SECRET),
     ],
   ]
 
-  for (const [name, token] of rejectedTokens) {
+  for (const [name, forge] of rejectedTokens) {
     it(`PUT и DELETE отклоняют токен: ${name} → 401, на диске ничего`, async () => {
+      const user = await registerUser()
+      const token = forge(user.token)
       const before = storedAvatars()
 
-      const put = await putAvatar(imageUpload(png()), token())
-      const removed = await deleteJson(AVATAR_PATH, token())
+      const put = await putAvatar(imageUpload(png()), token)
+      const removed = await deleteJson(AVATAR_PATH, token)
 
       expect(put.status).toBe(401)
       expect(removed.status).toBe(401)
       expect(storedAvatars()).toEqual(before)
     })
   }
+
+  it('контроль к подделкам: те же claims с нашей подписью ставят аватар', async () => {
+    const user = await registerUser()
+
+    const put = await putAvatar(imageUpload(png()), resignedGenuine(user.token))
+
+    expect(put.status).toBe(200)
+  })
 
   it('токен, выпущенный до смены пароля, — 401 на PUT и DELETE, аватар прежний', async () => {
     // Guard сверяет версию сессий: загрузка и удаление аватара — такие же

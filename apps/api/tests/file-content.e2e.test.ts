@@ -1,8 +1,7 @@
-import { createHmac } from 'node:crypto'
-
 import { describe, expect, it } from 'bun:test'
 
 import { asFile, asFiles, createMeeting, filesPath } from './helpers/files'
+import { FILE_LINK_SECRET, resign } from './helpers/forgeries'
 import { getJson, postFile, requestRaw } from './helpers/http'
 import { decodeJwt, signJwt } from './helpers/jwt'
 import { registerUser } from './helpers/users'
@@ -17,15 +16,6 @@ import { TEST_JWT_SECRET } from './setup'
  * `Range` проверяется побайтово: плеер перематывает запросами с диапазоном, и
  * кусок «примерно того размера» ломает воспроизведение молча.
  */
-
-/**
- * Секрет файловых ссылок тест выводит сам, а не берёт из кода: контракт — HMAC
- * от `JWT_SECRET` с меткой `file-link-v1`, и подмена его на сам `JWT_SECRET`
- * должна ронять тесты.
- */
-const FILE_LINK_SECRET = createHmac('sha256', TEST_JWT_SECRET)
-  .update('file-link-v1')
-  .digest('base64url')
 
 /** Срок ссылки по умолчанию — `FILE_LINK_EXPIRES_IN=15m`. */
 const LINK_LIFETIME_SECONDS = 15 * 60
@@ -109,14 +99,15 @@ describe('Ссылка на файл в списке', () => {
 })
 
 describe('GET /meetings/:id/files/:fileId/content', () => {
-  it('без Range: 200 и файл целиком, длина совпадает с размером', async () => {
+  it('без Range: 200 и файл целиком', async () => {
     const { file } = await ownerWithRecording()
 
     // Заголовка Authorization нет намеренно: доступ несёт токен в ссылке.
     const response = await requestRaw(file.url)
 
+    // `Content-Length` здесь не проверить: у `Bun.file` длину ставит Bun.serve,
+    // а `app.handle` его не поднимает. Длину сверяет `tests/live.e2e.test.ts`.
     expect(response.status).toBe(200)
-    expect(response.headers.get('content-length')).toBe(String(file.size))
     expect(response.headers.get('accept-ranges')).toBe('bytes')
     expect(response.headers.get('content-type')).toBe('video/mp4')
     expect(await bytesOf(response)).toEqual(BYTES)
@@ -180,6 +171,68 @@ describe('GET /meetings/:id/files/:fileId/content', () => {
 
     expect(response.status).toBe(416)
     expect(response.headers.get('content-range')).toBe('bytes */1000')
+  })
+
+  // Края годного диапазона. Режет кусок Elysia (`handleFile`) по тому же
+  // заголовку, а решает 206/416 наш `parseRange`: разойдись они хоть в одном
+  // крае — плеер получит не те байты молча, поэтому сверка побайтовая.
+  for (const [range, start, end] of [
+    // С этого запроса `<video>` в Chrome начинает любую запись.
+    ['bytes=0-', 0, 999],
+    ['bytes=0-0', 0, 0],
+    ['bytes=999-', 999, 999],
+    ['bytes=999-999', 999, 999],
+    // Суффикс длиннее файла — весь файл, а не 416.
+    ['bytes=-5000', 0, 999],
+    // Пробелы вокруг значения заголовка не делают его браком.
+    [' bytes=0-99 ', 0, 99],
+  ] as const) {
+    it(`«${range}» → 206, bytes ${start}-${end}/1000`, async () => {
+      const { file } = await ownerWithRecording()
+
+      const response = await requestRaw(file.url, withRange(range))
+
+      expect(response.status).toBe(206)
+      expect(response.headers.get('content-range')).toBe(`bytes ${start}-${end}/1000`)
+      expect(response.headers.get('content-length')).toBe(String(end - start + 1))
+      expect(await bytesOf(response)).toEqual(BYTES.slice(start, end + 1))
+    })
+  }
+
+  it('bytes=-0 → 416: пустой суффикс не выбирает ни байта', async () => {
+    const { file } = await ownerWithRecording()
+
+    const response = await requestRaw(file.url, withRange('bytes=-0'))
+
+    expect(response.status).toBe(416)
+    expect(response.headers.get('content-range')).toBe('bytes */1000')
+    // Плеер решает про перемотку по этому заголовку и в отказе.
+    expect(response.headers.get('accept-ranges')).toBe('bytes')
+  })
+
+  it('пустой файл: без Range — 200 и пустое тело, с любым Range — 416 bytes */0', async () => {
+    const owner = await registerUser()
+    const meetingId = await createMeeting(owner.token)
+    const uploaded = await postFile(
+      filesPath(meetingId),
+      { name: 'пустые заметки.txt', type: 'text/plain', body: '', declaredSize: 0 },
+      owner.token,
+    )
+
+    expect(uploaded.status).toBe(201)
+
+    const { url } = asFile(uploaded.body)
+    const whole = await requestRaw(url)
+
+    expect(whole.status).toBe(200)
+    expect(await bytesOf(whole)).toEqual(new Uint8Array())
+
+    for (const range of ['bytes=0-', 'bytes=-10']) {
+      const partial = await requestRaw(url, withRange(range))
+
+      expect(partial.status).toBe(416)
+      expect(partial.headers.get('content-range')).toBe('bytes */0')
+    }
   })
 
   // RFC 9110 разрешает игнорировать то, что не умеешь отдать: несколько
@@ -278,10 +331,34 @@ describe('Кто открывает файл', () => {
     const { meetingId, file } = await ownerWithRecording()
     const fileToken = tokenOf(file.url)
 
-    // На общем секрете guard `authenticated` принял бы такой токен: `/meetings`
-    // ответил бы 200 с пустым списком, `POST /meetings` — пятисоткой (ресерч, 2.3).
+    // У настоящего файлового токена `sub` — id файла, и guard отбил бы его
+    // уже тем, что такого пользователя нет. Этот случай — про ссылку как она есть.
     for (const path of ['/auth/me', '/meetings', filesPath(meetingId)]) {
       expect((await getJson(path, fileToken)).status).toBe(401)
     }
+  })
+
+  it('claims живой сессии, подписанные секретом ссылок, закрытых роутов не открывают', async () => {
+    // Разделение секретов со стороны guard'а: `sub` и `ver` настоящие, и
+    // отбить такой токен может только подпись. На общем секрете (ресерч, 2.3)
+    // `/meetings` ответил бы 200 — этот тест тогда краснеет.
+    const { owner, meetingId } = await ownerWithRecording()
+    const forged = resign(owner.token, FILE_LINK_SECRET)
+
+    for (const path of ['/auth/me', '/meetings', filesPath(meetingId)]) {
+      expect((await getJson(path, forged)).status).toBe(401)
+    }
+  })
+})
+
+describe('Id в пути не похож на uuid', () => {
+  it('годный токен, а id встречи — %00 → 404, а не 500', async () => {
+    const { file } = await ownerWithRecording()
+
+    const response = await requestRaw(
+      `/meetings/%00/files/${file.id}/content?token=${tokenOf(file.url)}`,
+    )
+
+    expect(response.status).toBe(404)
   })
 })
