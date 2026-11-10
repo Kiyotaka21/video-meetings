@@ -405,6 +405,15 @@ claims api, а не данные для показа. Подпись без се
 cmd //c mklink //J ".claude\\skills\\<имя>" ".agents\\skills\\<имя>"
 ```
 
+**Субагенты-ревьюеры коммитятся в `.claude/agents/`, в отличие от скиллов —
+без слоя ссылок.** Claude Code ищет субагентов только там, и каталог в
+`.gitignore` не попадает. Их три: `security-reviewer` (со скиллом
+`security-auditor` и `Bash` — смотреть `git diff`), `performance-reviewer` и
+`test-coverage-reviewer`, оба только на чтение (`Read`, `Grep`, `Glob`). Скилл
+`review-all` запускает все три параллельно и сводит отчёты в один. Ревьюеры
+только читают и ничего не правят: их вывод — список находок, а проверять его
+перед правкой — работа того, кто их позвал.
+
 ## Документация обновляется в том же коммите
 
 Правка, меняющая архитектуру, считается незавершённой, пока документация ей
@@ -439,6 +448,7 @@ cmd //c mklink //J ".claude\\skills\\<имя>" ".agents\\skills\\<имя>"
 | Тесты появились в новом воркспейсе или сменился раннер                    | раздел «Тесты» в корневом `CLAUDE.md`, раздел «Тесты» в `apps/*/CLAUDE.md`, «Скрипты» в `README.md`                                                                                             |
 | Новый или изменённый хук Claude Code                                      | раздел «Правки агента форматирует хук» или «Stop-хук ведёт Ralph-цикл» корневого `CLAUDE.md`                                                                                                    |
 | Новый скилл агента                                                        | `.agents/skills/<имя>/SKILL.md` + ссылка в `.claude/skills/` — раздел «Скиллы коммитятся из `.agents/skills/`»                                                                                  |
+| Новый субагент                                                            | `.claude/agents/<имя>.md` — абзац «Субагенты-ревьюеры коммитятся в `.claude/agents/`» корневого `CLAUDE.md`                                                                                     |
 | Правка `.husky/pre-commit` или новый git-хук                              | раздел «Коммит проходит через husky» корневого `CLAUDE.md`                                                                                                                                      |
 | Новый MCP-сервер в `.mcp.json`                                            | раздел «Playwright MCP объявлен в `.mcp.json`» корневого `CLAUDE.md`, раздел «Тулинг» в `README.md`                                                                                             |
 | Правка схем `credentials`, `password` или `JWT_EXPIRES_IN` на api         | `apps/web/app/utils/auth.ts` и `useAuth.ts`, раздел «Авторизация» в `apps/web/CLAUDE.md`                                                                                                        |
