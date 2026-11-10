@@ -124,12 +124,25 @@ const WRONG_CURRENT_PASSWORD = 'Текущий пароль неверен'
 const SAME_PASSWORD = 'Новый пароль совпадает с текущим'
 
 /**
+ * 429 — api ограничивает частоту входа, регистрации и попыток текущего пароля
+ * при смене. Сколько ждать, знает только api, и пишет это в `message` по-русски
+ * для показа как есть («Попробуйте через 15 мин.»), — поэтому берём его текст,
+ * а свой остаётся на случай, если тела нет. «Попробуйте ещё раз» тут было бы
+ * вредным советом: повтор сразу упрётся в тот же лимит.
+ */
+const TOO_MANY_ATTEMPTS = 'Слишком много попыток. Попробуйте позже.'
+
+const tooManyAttempts = (error: unknown): string => apiMessageOf(error) ?? TOO_MANY_ATTEMPTS
+
+/**
  * Раскладывает отказ `POST /auth/me/password`. 401 сюда не попадает: его ловит
  * `isUnauthorized` раньше — это конец сессии, а не ошибка в поле.
  *
  * 403 и 400 — про конкретные поля, и текст уходит под них: под строку `help`,
  * поэтому он обязан помещаться в одну строку на 360px. Остальное — про запрос
- * целиком, без `field`: такое страница показывает тостом.
+ * целиком, без `field`: такое страница показывает тостом. 429 тоже без поля,
+ * хотя лимит считает неверные текущие пароли: текст api с временем ожидания в
+ * строку под полем не помещается, а блокирует он форму целиком.
  */
 export const describePasswordChangeFailure = (error: unknown): PasswordChangeFailure => {
   switch (statusOf(error)) {
@@ -137,6 +150,8 @@ export const describePasswordChangeFailure = (error: unknown): PasswordChangeFai
       return { field: 'currentPassword', message: apiMessageOf(error) ?? WRONG_CURRENT_PASSWORD }
     case 400:
       return { field: 'newPassword', message: apiMessageOf(error) ?? SAME_PASSWORD }
+    case 429:
+      return { message: tooManyAttempts(error) }
     case 422:
       // Нашу проверку тело прошло, значит, границы здесь и на api разъехались.
       return {
@@ -153,8 +168,9 @@ export const describePasswordChangeFailure = (error: unknown): PasswordChangeFai
 const REJECTED_BY_API = 'API отклонил данные формы — проверьте адрес и пароль.'
 
 /**
- * Раскладывает отказ `/auth/register` на текст для пользователя. 409 — единственный
- * содержательный случай: api отвечает им на занятый адрес (нарушение unique-индекса).
+ * Раскладывает отказ `/auth/register` на текст для пользователя. Про поле — только
+ * 409: api отвечает им на занятый адрес (нарушение unique-индекса). 429 — лимит
+ * регистраций с одного адреса сети, текстом api над формой.
  */
 export const describeRegisterFailure = (error: unknown): AuthFailure => {
   switch (statusOf(error)) {
@@ -162,6 +178,8 @@ export const describeRegisterFailure = (error: unknown): AuthFailure => {
       return { field: 'email', message: 'Этот адрес уже зарегистрирован' }
     case 422:
       return { message: REJECTED_BY_API }
+    case 429:
+      return { message: tooManyAttempts(error) }
     case undefined:
       return { message: NO_CONNECTION_MESSAGE }
     default:
@@ -182,6 +200,10 @@ export const describeLoginFailure = (error: unknown): AuthFailure => {
       return { message: 'Неверный адрес почты или пароль' }
     case 422:
       return { message: REJECTED_BY_API }
+    // Без `field` по той же причине, что и 401: лимит — про попытки, а не про
+    // одно из полей.
+    case 429:
+      return { message: tooManyAttempts(error) }
     case undefined:
       return { message: NO_CONNECTION_MESSAGE }
     default:
